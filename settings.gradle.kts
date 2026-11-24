@@ -23,6 +23,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "TunerStudioAndroid"
+rootProject.name = "Speedroid"
 include(":app")
- 

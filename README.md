@@ -1,4 +1,4 @@
-# Tuner Speeduino para Android
+# Speedroid
 
 Versão Android do projeto `/home/guisparda/desenvolvimento/projetos/java/TunerSpeeduino`, com interface nativa em Kotlin e núcleo de interpretação INI, modelo ECU, MSQ e protocolo reaproveitados em Java. O projeto de origem permanece intacto. Android 8.0/API 26 ou superior.
 

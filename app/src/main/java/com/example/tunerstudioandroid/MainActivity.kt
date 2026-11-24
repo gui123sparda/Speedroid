@@ -208,7 +208,7 @@ class MainActivity : AppCompatActivity() {
     private fun render() {
         root.removeAllViews(); readouts.clear(); gauge = null; dashView = null; vssStatusText = null; speedText = null; sensorText = null
         val heading = row().apply { setPadding(dp(16),dp(8),dp(16),dp(2)) }
-        heading.addView(text("TUNER / SPEEDUINO",18f).apply { typeface = Typeface.DEFAULT_BOLD }, LinearLayout.LayoutParams(0,-2,1f))
+        heading.addView(text(getString(R.string.app_name),18f).apply { typeface = Typeface.DEFAULT_BOLD }, LinearLayout.LayoutParams(0,-2,1f))
         status = text("OFFLINE",12f,teal); heading.addView(status)
         root.addView(heading)
         detail = text(connectionDetail(),12f,muted).apply { setPadding(dp(20),0,dp(20),dp(8)); maxLines=2 }
