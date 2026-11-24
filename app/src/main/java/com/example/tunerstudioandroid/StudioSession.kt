@@ -98,9 +98,10 @@ class StudioSession(context: Context) {
             }
         }
     }
-    fun connect(link: Link) {
+    fun connect(link: Link, onConnected: (() -> Unit)? = null) {
         if (busy) return
         candidate = link
+        lastTelemetry = 0
         connectionProgress = 0.0
         val bridge = GpsVssBridge()
         gpsBridge = bridge
@@ -118,13 +119,17 @@ class StudioSession(context: Context) {
                 catch (e: RuntimeException) { lastTelemetry = 0; throw e }
             }
         }
-        runOperation({ transport.connect(measured) }, { candidate = null; connectionProgress = 100.0 })
+        runOperation({ transport.connect(measured) }, {
+            candidate = null
+            connectionProgress = 100.0
+            onConnected?.invoke()
+        })
     }
     var selectedTriggerMode = TriggerCapture.Mode.COMPOSITE
     var triggerExport: String? = null
     fun startTriggerLogger() { runOperation({ transport.startTriggerLogger(selectedTriggerMode) }) }
     fun stopTriggerLogger() { enqueue({ transport.stopTriggerLogger() }) }
-    fun disconnect() { recording = false; lastTelemetry = 0; runOperation({ transport.disconnect() }) }
+    fun disconnect() { recording = false; lastTelemetry = 0; enqueue({ transport.disconnect() }) }
     fun saveSession() {
         val file = File(app.filesDir, "session.msq")
         val temporary = File(app.filesDir, "session.tmp")

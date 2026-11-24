@@ -43,9 +43,11 @@ Uma porta RS232 exige ponte Bluetooth–RS232 ou conversor USB–RS232 com os n�
 
 ### USB serial / RS232
 
-Use celular com USB host/OTG e cabo/adaptador OTG, conecte a ECU USB ou adaptador USB–serial e abra **Conexão → USB / RS232 via OTG**. Escolha dispositivo e porta, aceite a autorização USB do Android e selecione o baud rate. Configuração padrão: **115200, 8 bits, sem paridade, 1 stop bit**.
+Com a Speeduino alimentada, ligue a porta USB da placa ao celular com um cabo de dados e, se necessário, um adaptador OTG. Abra **Conexão → Speeduino via cabo USB (OTG)**, escolha a porta se houver mais de uma e autorize o acesso no Android. Toque em **Conectar** com a configuração padrão de **115200 baud, 8 bits, sem paridade, 1 stop bit**, ou ajuste a velocidade conforme o firmware. Para uma ECU com porta RS232, use um conversor USB–RS232 compatível.
 
-Os drivers vêm da biblioteca `usb-serial-for-android` (CDC/ACM, FTDI, CP210x, CH34x e Prolific, conforme suporte do driver). Adaptadores com várias portas permitem escolher a porta. O aplicativo não alterna DTR automaticamente. Uma falha de telemetria encerra a conexão e remove os valores antigos; reconecte pelo menu após corrigir o cabo ou adaptador.
+Os drivers vêm da biblioteca `usb-serial-for-android` (CDC/ACM, FTDI, CP210x, CH34x e Prolific, conforme suporte do driver). Algumas placas Arduino USB CDC/ACM precisam do sinal DTR para transmitir. Se a placa precisar desse sinal, marque **Ativar DTR** ao conectar. A opção vem desmarcada, pois pode reiniciar a placa.
+
+Depois da primeira conexão bem-sucedida, o app tenta reconectar quando a Speeduino volta a ficar disponível, com a mesma porta, velocidade e configuração de DTR. A telemetria fica indisponível durante a queda. Se o Android pedir autorização USB novamente, aceite para continuar. Com o app aberto, até três tentativas são feitas com pelo menos cinco segundos de intervalo. Se a reconexão pausar, reconecte o cabo ou use o menu **Conexão**. O botão **Desconectar** cancela a reconexão automática.
 
 ## Velocidade e acelerômetro
 

@@ -31,6 +31,7 @@ import com.example.tunerstudioandroid.trigger.TriggerScopeView
 import com.example.tunerstudioandroid.vss.GpsVssBridge
 import android.provider.OpenableColumns
 import androidx.lifecycle.ViewModelProvider
+import com.hoho.android.usbserial.driver.CdcAcmSerialDriver
 import com.hoho.android.usbserial.driver.UsbSerialPort
 import com.hoho.android.usbserial.driver.UsbSerialProber
 import org.clonetuner.comm.*
@@ -38,6 +39,7 @@ import org.clonetuner.ini.IniModel
 import org.clonetuner.model.*
 import java.io.File
 import java.util.Locale
+import java.util.UUID
 import kotlin.math.*
 
 class MainActivity : AppCompatActivity() {
@@ -68,7 +70,10 @@ class MainActivity : AppCompatActivity() {
     private var speedText: TextView? = null
     private var sensorText: TextView? = null
     private val readouts = linkedMapOf<String, TextView>()
-    private var pendingPort: UsbSerialPort? = null
+    private var pendingUsb: Bundle? = null
+    private var usbOptionsDialog: AlertDialog? = null
+    private var usbPermissionDenied = false
+    private var activityResumed = false
     private var pendingBluetooth = false
     private var lastError: String? = null
     private var pendingDocument = 0
@@ -87,13 +92,19 @@ class MainActivity : AppCompatActivity() {
     private val refresh = object : Runnable {
         override fun run() { updateReadings(); handler.postDelayed(this, 50) }
     }
+    private val usbReconnectCheck = object : Runnable {
+        override fun run() {
+            checkUsbReconnect()
+            handler.postDelayed(this, 1000)
+        }
+    }
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != permissionAction) return
-            val port = pendingPort ?: return
-            pendingPort = null
-            if (usb.hasPermission(port.driver.device)) connectUsb(port)
-            else toast("Permissão USB recusada")
+            val request = pendingUsb ?: return
+            if (intent.getStringExtra("usbToken") != request.getString("usbToken")) return
+            usbPermissionDenied = usb.deviceList[request.getString("device")]?.let(usb::hasPermission) != true
+            finishUsbPermission()
         }
     }
 
@@ -103,6 +114,8 @@ class MainActivity : AppCompatActivity() {
         phone = PhoneSensors(this).apply { onGpsFix = { session.gpsFix = it } }
         tab = savedInstanceState?.getString("tab") ?: "Painel"
         pendingDocument = savedInstanceState?.getInt("document") ?: 0
+        pendingUsb = savedInstanceState?.getBundle("pendingUsb")
+        usbPermissionDenied = savedInstanceState?.getBoolean("usbPermissionDenied") == true
         layout = getPreferences(MODE_PRIVATE).getString("layout", "Verde")!!.let { when(it) { "Rally"->"Verde";"Escort"->"Azul";"Mondeo"->"Âmbar";else->it } }
         root = column().apply { setBackgroundColor(bg) }
         setContentView(root)
@@ -126,6 +139,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
     override fun onStart() { super.onStart(); phone.start(); handler.post(refresh) }
+    override fun onPostResume() {
+        super.onPostResume()
+        activityResumed = true
+        finishUsbPermission()
+        handler.post(usbReconnectCheck)
+    }
+    override fun onPause() {
+        activityResumed = false
+        handler.removeCallbacks(usbReconnectCheck)
+        super.onPause()
+    }
     override fun onStop() {
         handler.removeCallbacks(refresh); phone.stop()
         // End acquisition in the foreground; no background location permission is needed.
@@ -134,8 +158,16 @@ class MainActivity : AppCompatActivity() {
         }
         super.onStop()
     }
-    override fun onDestroy() { triggerDialog?.setOnDismissListener(null); triggerDialog?.dismiss(); fullScreenDialog?.dismiss(); unregisterReceiver(usbReceiver); session.listener = null; super.onDestroy() }
-    override fun onSaveInstanceState(outState: Bundle) { outState.putBoolean("triggerLogger",triggerDialog?.isShowing==true); outState.putBoolean("fullscreen",fullScreenDialog?.isShowing == true); outState.putString("tab",tab); outState.putInt("document",pendingDocument); super.onSaveInstanceState(outState) }
+    override fun onDestroy() { triggerDialog?.setOnDismissListener(null); triggerDialog?.dismiss(); fullScreenDialog?.dismiss(); usbOptionsDialog?.dismiss(); unregisterReceiver(usbReceiver); session.listener = null; super.onDestroy() }
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean("triggerLogger", triggerDialog?.isShowing == true)
+        outState.putBoolean("fullscreen", fullScreenDialog?.isShowing == true)
+        outState.putString("tab", tab)
+        outState.putInt("document", pendingDocument)
+        outState.putBundle("pendingUsb", pendingUsb)
+        outState.putBoolean("usbPermissionDenied", usbPermissionDenied)
+        super.onSaveInstanceState(outState)
+    }
 
     private fun dp(n: Int) = (n * resources.displayMetrics.density).roundToInt()
     private fun column() = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -168,6 +200,9 @@ class MainActivity : AppCompatActivity() {
     private fun connectionDetail(): String = when {
         session.busy -> "Operação em andamento…"
         session.transport.isConnected -> session.transport.description()
+        model.usbReconnect?.permissionDenied == true -> "Acesso USB recusado · autorize pelo menu Conexão"
+        (model.usbReconnect?.attempts ?: 0) >= USB_RECONNECT_ATTEMPTS -> "Reconexão USB pausada · reconecte o cabo"
+        model.usbReconnect?.armed == true -> "Aguardando reconexão USB"
         else -> "Speeduino · ${session.ini.signature}"
     }
     private fun render() {
@@ -795,16 +830,24 @@ class MainActivity : AppCompatActivity() {
         title("Conectar ao Speeduino")
         note("${session.ini.signature}\n${session.ini.constants.size} parâmetros · ${session.ini.channels.size} canais")
         button("Bluetooth serial (SPP)") { bluetoothPermission() }
-        button("USB / RS232 via OTG") { chooseUsb() }
-        button("Desconectar") { session.disconnect() }
+        button("Speeduino via cabo USB (OTG)") { chooseUsb() }
+        button("Desconectar") {
+            cancelUsbReconnect()
+            session.disconnect()
+        }
         val sim=card()
         sim.addView(text("Modo de demonstração",18f))
         sim.addView(text("Telemetria simulada para explorar os instrumentos e editores sem uma ECU.",14f,muted))
-        button("Iniciar demonstração",sim) { session.connect(SimLink(session.ini)) }
+        button("Iniciar demonstração",sim) {
+            if (!session.busy) {
+                cancelUsbReconnect()
+                session.connect(SimLink(session.ini))
+            }
+        }
         button("Carregar definição INI") {
             confirm("Trocar definição INI", "A conexão será encerrada e o ajuste local será reiniciado. Salve um MSQ antes de trocar a definição.") { openDocument(IMPORT_INI,"*/*") }
         }
-        note("Bluetooth: pareie o adaptador SPP nas configurações do Android antes de conectar. A velocidade serial do módulo deve coincidir com a ECU.\n\nUSB: use OTG e adaptador USB–serial compatível. RS232 exige um conversor com níveis elétricos RS232. O padrão é 115200 baud, 8N1.")
+        note("Bluetooth: pareie o adaptador SPP nas configurações do Android antes de conectar. A velocidade serial do módulo deve coincidir com a ECU.\n\nUSB: ligue a porta USB da Speeduino ao celular com um cabo de dados e, se necessário, um adaptador OTG. O padrão é 115200 baud, 8N1. Para uma porta RS232, use um conversor USB–RS232.")
         button("Autorizar localização precisa") { locationPermission() }
         button("Configurações de localização") { startActivity(Intent(android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS)) }
     }
@@ -832,28 +875,172 @@ class MainActivity : AppCompatActivity() {
         val devices=adapter.bondedDevices.sortedBy { it.name ?: it.address }
         if(devices.isEmpty()) { toast("Pareie primeiro seu adaptador serial nas configurações Bluetooth"); startActivity(Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)); return }
         AlertDialog.Builder(this).setTitle("Adaptadores pareados · SPP").setItems(devices.map { "${it.name ?: "Bluetooth"}\n${it.address}" }.toTypedArray()) { _,which ->
-            session.connect(StreamLink(session.ini,BluetoothSerial(devices[which])))
-        }.setNegativeButton("Cancelar",null).show()
-    }
-    private fun chooseUsb() {
-        val ports=UsbSerialProber.getDefaultProber().findAllDrivers(usb).flatMap { it.ports }
-        if(ports.isEmpty()) { toast("Nenhum adaptador USB–serial encontrado. Conecte-o via OTG."); return }
-        AlertDialog.Builder(this).setTitle("Portas USB disponíveis").setItems(ports.map {
-            "${it.driver.javaClass.simpleName} · ${it.driver.device.deviceName} · porta ${it.portNumber+1}"
-        }.toTypedArray()) { _,which ->
-            val port=ports[which]
-            if(usb.hasPermission(port.driver.device)) connectUsb(port)
-            else {
-                pendingPort=port
-                usb.requestPermission(port.driver.device,PendingIntent.getBroadcast(this,0,Intent(permissionAction).setPackage(packageName),PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
+            if (!session.busy) {
+                cancelUsbReconnect()
+                session.connect(StreamLink(session.ini,BluetoothSerial(devices[which])))
             }
         }.setNegativeButton("Cancelar",null).show()
     }
-    private fun connectUsb(port:UsbSerialPort) {
-        val rates=listOf(115200,57600,38400,19200,9600)
-        AlertDialog.Builder(this).setTitle("Velocidade serial · 8N1").setItems(rates.map { "$it baud" }.toTypedArray()) { _,which ->
-            session.connect(StreamLink(session.ini,UsbSerial(usb,port,rates[which])))
-        }.setNegativeButton("Cancelar",null).show()
+    private fun chooseUsb() {
+        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_USB_HOST)) {
+            toast("Este aparelho não informa suporte a USB host (OTG).")
+            return
+        }
+        if (usb.deviceList.isEmpty()) {
+            toast("Nenhum dispositivo USB detectado. Verifique o cabo de dados e o adaptador OTG.")
+            return
+        }
+        val ports = UsbSerialProber.getDefaultProber().findAllDrivers(usb).flatMap { it.ports }
+        if (ports.isEmpty()) {
+            toast("O Android detectou USB, mas nenhuma porta serial compatível foi encontrada.")
+            return
+        }
+        if (ports.size == 1) {
+            requestUsbPermission(ports.single())
+            return
+        }
+        val labels = ports.map { port ->
+            val device = port.driver.device
+            val name = device.productName ?: port.driver.javaClass.simpleName
+            "$name · porta ${port.portNumber + 1}\n${device.deviceName}"
+        }
+        AlertDialog.Builder(this).setTitle("Portas USB disponíveis")
+            .setItems(labels.toTypedArray()) { _, which -> requestUsbPermission(ports[which]) }
+            .setNegativeButton("Cancelar", null).show()
+    }
+
+    private fun requestUsbPermission(port: UsbSerialPort, reconnect: Boolean = false) {
+        val device = port.driver.device
+        if (usb.deviceList[device.deviceName] == null) {
+            toast("Dispositivo USB desconectado. Reconecte o cabo OTG.")
+            return
+        }
+        pendingUsb = null
+        usbPermissionDenied = false
+        if (usb.hasPermission(device)) {
+            if (reconnect) model.usbReconnect?.let { connectUsb(port, it) } else configureUsb(port)
+            return
+        }
+        val token = UUID.randomUUID().toString()
+        pendingUsb = Bundle().apply {
+            putString("usbToken", token)
+            putString("device", device.deviceName)
+            putInt("port", port.portNumber)
+            putBoolean("reconnect", reconnect)
+        }
+        val result = Intent(permissionAction).setPackage(packageName).putExtra("usbToken", token)
+        val callback = PendingIntent.getBroadcast(
+            this, token.hashCode(), result, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_ONE_SHOT
+        )
+        try {
+            usb.requestPermission(device, callback)
+        } catch (_: SecurityException) {
+            pendingUsb = null
+            callback.cancel()
+            if (reconnect) model.usbReconnect?.permissionDenied = true
+            toast("O Android não permitiu solicitar acesso USB.")
+        }
+    }
+
+    private fun finishUsbPermission() {
+        if (!activityResumed) return
+        val request = pendingUsb ?: return
+        if (request.getBoolean("reconnect") && model.usbReconnect == null) {
+            pendingUsb = null
+            usbPermissionDenied = false
+            return
+        }
+        val device = usb.deviceList[request.getString("device")]
+        if (device != null && !usbPermissionDenied && !usb.hasPermission(device)) return
+        pendingUsb = null
+        val denied = usbPermissionDenied
+        usbPermissionDenied = false
+        if (request.getBoolean("reconnect")) {
+            val target = model.usbReconnect ?: return
+            if (device != null && target.attachment == device.deviceName && denied) {
+                target.permissionDenied = true
+                toast("Permissão USB recusada.")
+            }
+            // Recheck the device identity and session state before opening it.
+            return
+        }
+        when {
+            device == null -> toast("Dispositivo USB desconectado. Reconecte o cabo OTG.")
+            denied -> toast("Permissão USB recusada.")
+            else -> {
+                val port = UsbSerialProber.getDefaultProber().probeDevice(device)?.ports
+                    ?.firstOrNull { it.portNumber == request.getInt("port") }
+                if (port == null) toast("Porta serial USB indisponível.") else configureUsb(port)
+            }
+        }
+    }
+
+    private fun configureUsb(port: UsbSerialPort) {
+        val rates = listOf(115200, 57600, 38400, 19200, 9600)
+        val options = column().apply { setPadding(dp(24), 0, dp(24), 0) }
+        options.addView(text("Velocidade serial · 8N1", color = muted))
+        val speed = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
+                rates.map { "$it baud" })
+        }
+        options.addView(speed)
+        val dtr = CheckBox(this).apply { text = "Ativar DTR (pode reiniciar a placa)" }
+        if (port.driver is CdcAcmSerialDriver) options.addView(dtr)
+        usbOptionsDialog = AlertDialog.Builder(this).setTitle("Conectar via USB")
+            .setView(options).setNegativeButton("Cancelar", null)
+            .setPositiveButton("Conectar") { _, _ ->
+                if (session.busy) toast("Aguarde a operação atual e tente novamente.")
+                else {
+                    val target = UsbReconnectTarget(port, rates[speed.selectedItemPosition], dtr.isChecked)
+                    model.usbReconnect = target
+                    connectUsb(port, target)
+                }
+            }.show()
+    }
+
+    private fun cancelUsbReconnect() {
+        model.usbReconnect = null
+        pendingUsb = null
+        usbPermissionDenied = false
+    }
+
+    private fun checkUsbReconnect() {
+        val target = model.usbReconnect ?: return
+        if (!target.armed || session.busy) return
+        if (usbOptionsDialog?.isShowing == true) return
+        if (pendingUsb?.getBoolean("reconnect") == false) {
+            finishUsbPermission()
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        if (session.transport.isConnected) {
+            if (session.fresh && now >= target.nextAttemptAt + USB_RECONNECT_INTERVAL_MS) target.attempts = 0
+            return
+        }
+        val device = target.findDevice(usb)
+        target.updateAttachment(device)
+        val request = pendingUsb
+        if (request != null) {
+            if (device != null && request.getString("device") == device.deviceName && !usb.hasPermission(device)) return
+            pendingUsb = null
+            usbPermissionDenied = false
+        }
+        if (device == null || target.permissionDenied || target.attempts >= USB_RECONNECT_ATTEMPTS ||
+            now < target.nextAttemptAt) return
+        val port = UsbSerialProber.getDefaultProber().probeDevice(device)?.ports
+            ?.firstOrNull { it.portNumber == target.portNumber } ?: return
+        requestUsbPermission(port, reconnect = true)
+    }
+
+    private fun connectUsb(port: UsbSerialPort, target: UsbReconnectTarget) {
+        target.attempts++
+        target.nextAttemptAt = SystemClock.elapsedRealtime() + USB_RECONNECT_INTERVAL_MS
+        val serial = UsbSerial(usb, port, target.baud, target.enableDtr)
+        session.connect(StreamLink(session.ini, serial, true)) {
+            if (!target.armed) target.attempts = 0
+            target.armed = true
+            target.nextAttemptAt = SystemClock.elapsedRealtime() + USB_RECONNECT_INTERVAL_MS
+        }
     }
 
     private fun openDocument(code:Int,mime:String) {
@@ -906,6 +1093,7 @@ class MainActivity : AppCompatActivity() {
                     file.copyTo(File(filesDir,"speeduino.ini"),overwrite=true)
                     File(filesDir,"session.msq").delete()
                 }, {
+                    cancelUsbReconnect()
                     old.close(false); model.session=StudioSession(applicationContext); extrema.clear(); bindSession(); render(); toast("Definição INI carregada")
                 })
             }
@@ -934,6 +1122,8 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val GPS_PERMISSION=20
         private const val BT_PERMISSION=21
+        private const val USB_RECONNECT_ATTEMPTS = 3
+        private const val USB_RECONNECT_INTERVAL_MS = 5000L
         private const val EXPORT_MSQ=100
         private const val IMPORT_MSQ=101
         private const val EXPORT_CSV=102

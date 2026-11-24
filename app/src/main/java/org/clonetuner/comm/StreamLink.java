@@ -22,12 +22,18 @@ public final class StreamLink implements Link {
 
     private final IniModel ini;
     private final SerialIo port;
+    private final boolean retrySignatureOnSilence;
     private volatile boolean connected;
     private int canId;
 
     public StreamLink(IniModel ini, SerialIo port) {
+        this(ini, port, false);
+    }
+
+    public StreamLink(IniModel ini, SerialIo port, boolean retrySignatureOnSilence) {
         this.ini = ini;
         this.port = port;
+        this.retrySignatureOnSilence = retrySignatureOnSilence;
     }
 
     @Override
@@ -61,7 +67,8 @@ public final class StreamLink implements Link {
 
     @Override
     public synchronized String signature() {
-        byte[] resp = request(ini.queryCommand.getBytes(StandardCharsets.ISO_8859_1), -1, false);
+        byte[] resp = request(ini.queryCommand.getBytes(StandardCharsets.ISO_8859_1), -1, false,
+                retrySignatureOnSilence);
         String s = new String(resp, StandardCharsets.ISO_8859_1);
         return s.replace("\0", "").trim();
     }
@@ -219,9 +226,28 @@ public final class StreamLink implements Link {
     }
 
     private byte[] request(byte[] command, int expected, boolean burn) {
+        return request(command, expected, burn, false);
+    }
+
+    private byte[] request(byte[] command, int expected, boolean burn, boolean retryOnSilence) {
         try {
-            send(SerialProtocol.frame(command));
-            byte[] header = readFully(2);
+            byte[] frame = SerialProtocol.frame(command);
+            send(frame);
+            byte[] header;
+            try {
+                header = readFully(2);
+            } catch (ReadTimeout timeout) {
+                if (!retryOnSilence || timeout.received != 0 || Thread.currentThread().isInterrupted()) throw timeout;
+                // A board that reset on USB open may still be starting when the first query arrives.
+                send(frame);
+                try {
+                    header = readFully(2);
+                } catch (ReadTimeout retryTimeout) {
+                    if (retryTimeout.received != 0) throw retryTimeout;
+                    throw new IllegalStateException("A ECU não respondeu. Confira a alimentação, a porta e o baud rate. "
+                            + "Se a placa exigir DTR, habilite a opção com o motor desligado.", retryTimeout);
+                }
+            }
             int len = ((header[0] & 0xFF) << 8) | (header[1] & 0xFF);
             if (len <= 0 || len > 4096) {
                 throw new IllegalStateException("Invalid controller response length: " + len);
@@ -251,9 +277,18 @@ public final class StreamLink implements Link {
             }
         }
         if (out.size() != count) {
-            throw new IllegalStateException("Serial read timed out: " + out.size() + "/" + count + " bytes");
+            throw new ReadTimeout(out.size(), count);
         }
         return out.toByteArray();
+    }
+
+    private static final class ReadTimeout extends IllegalStateException {
+        private final int received;
+
+        private ReadTimeout(int received, int expected) {
+            super("Serial read timed out: " + received + "/" + expected + " bytes");
+            this.received = received;
+        }
     }
 
     @Override
