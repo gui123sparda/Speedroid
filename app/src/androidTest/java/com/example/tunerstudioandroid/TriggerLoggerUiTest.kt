@@ -54,7 +54,7 @@ class TriggerLoggerUiTest {
         onView(withText(containsString("Conecte uma ECU"))).check(matches(isDisplayed()))
     }
     @Test fun liveCompositeFreezesInspectsAndStopsWhenClosed() {
-        onView(withText("Conexão")).perform(scrollTo(),click())
+        onView(withText("Conexão")).perform(click())
         onView(withText("Iniciar demonstração")).perform(scrollTo(),click())
         val deadline=SystemClock.elapsedRealtime()+5000
         var connected=false

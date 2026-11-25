@@ -4,6 +4,8 @@ import android.graphics.Rect
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.HorizontalScrollView
+import android.widget.ScrollView
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.action.ViewActions.*
@@ -24,8 +26,10 @@ class MapAndSettingsTest {
     private fun descendants(view: View): List<View> = listOf(view) +
         if (view is ViewGroup) (0 until view.childCount).flatMap { descendants(view.getChildAt(it)) } else emptyList()
 
-    @Test fun portraitMapFitsAndEditsOriginalOffset() = checkMap(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
-    @Test fun landscapeMapFitsAndEditsOriginalOffset() = checkMap(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE)
+    private fun View.getLocationOnScreenY() = IntArray(2).also(::getLocationOnScreen)[1]
+
+    @Test fun portraitMapScrollsAndEditsOriginalOffset() = checkMap(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
+    @Test fun landscapeMapScrollsAndEditsOriginalOffset() = checkMap(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE)
 
     private fun checkMap(orientation: Int) {
         activity.scenario.onActivity { it.requestedOrientation = orientation }
@@ -42,6 +46,7 @@ class MapAndSettingsTest {
         androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().uiAutomation.waitForIdle(500,5000)
         var tableTitle = ""
         var firstCell = ""
+        var yAxisName = ""
         var otherCell = 0.0
         var firstIndex = 0
         var otherIndex = 1
@@ -49,6 +54,7 @@ class MapAndSettingsTest {
             val s = ViewModelProvider(a)[StudioModel::class.java].session
             val t = s.ini.tables.values.first { it.zBins == "veTable" }
             tableTitle = t.title
+            yAxisName = t.yBins
             val c = s.ini.constant(t.zBins)!!
             val reversed = orientation == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
             for (i in 0 until c.cols()) s.ecu.set(t.xBins, i, 500.0 + 500*(if(reversed) c.cols()-1-i else i))
@@ -64,17 +70,33 @@ class MapAndSettingsTest {
             if (error != null) throw error
             val cells = descendants(view.rootView).filter { it.contentDescription?.startsWith("veTable, ") == true }
             assertEquals(256, cells.size)
-            cells.forEach { cell ->
-                val visible = Rect()
-                assertTrue("Every cell must be on screen", cell.getGlobalVisibleRect(visible))
-                assertEquals("Cell must not be horizontally clipped", cell.width, visible.width())
-                assertEquals("Cell must not be vertically clipped", cell.height, visible.height())
-            }
-            val first = cells.first { it.contentDescription.toString() == firstCell }
-            val positions = cells.map { IntArray(2).also(it::getLocationOnScreen) }
+            val first = cells.first { it.contentDescription.toString().startsWith("$firstCell, valor ") }
+            val viewport = descendants(view.rootView).filterIsInstance<MapViewport>().single()
+            val scroll = descendants(viewport).filterIsInstance<ScrollView>().single()
+            val (sheet, header) = descendants(viewport).filterIsInstance<HorizontalScrollView>()
+            val xAxis = header.getLocationOnScreenY()
+            assertTrue("The low-RPM, low-load cell is visible on open", first.getGlobalVisibleRect(Rect()))
+            assertEquals(0, sheet.scrollX)
             val origin = IntArray(2).also(first::getLocationOnScreen)
-            assertEquals(positions.minOf { it[0] }, origin[0])
-            assertEquals(positions.maxOf { it[1] }, origin[1])
+            assertEquals(cells.minOf { IntArray(2).also(it::getLocationOnScreen)[0] }, origin[0])
+            assertEquals(cells.maxOf { it.getLocationOnScreenY() }, origin[1])
+            assertTrue(xAxis > origin[1])
+            scroll.scrollTo(0, 0)
+            assertEquals(xAxis, header.getLocationOnScreenY())
+            val yAxis = descendants(viewport).first { it.contentDescription?.startsWith("$yAxisName [") == true }
+            val yAxisX = IntArray(2).also(yAxis::getLocationOnScreen)[0]
+            sheet.scrollTo(sheet.getChildAt(0).width - sheet.width, 0)
+            assertTrue(sheet.scrollX > 0)
+            assertEquals(sheet.scrollX, header.scrollX)
+            assertEquals(yAxisX, IntArray(2).also(yAxis::getLocationOnScreen)[0])
+            sheet.scrollTo(0, 0)
+            scroll.scrollTo(0, scroll.getChildAt(0).height)
+            assertTrue(scroll.scrollY > 0)
+            assertEquals(xAxis, header.getLocationOnScreenY())
+            val visible = Rect()
+            assertTrue(first.getGlobalVisibleRect(visible))
+            assertEquals(first.width, visible.width())
+            assertEquals(first.height, visible.height())
             val bitmap = android.graphics.Bitmap.createBitmap(view.rootView.width,view.rootView.height,android.graphics.Bitmap.Config.ARGB_8888)
             view.rootView.draw(android.graphics.Canvas(bitmap))
             java.io.File(view.context.filesDir,"map-review-$orientation.png").outputStream().use {
@@ -82,7 +104,7 @@ class MapAndSettingsTest {
             }
             bitmap.recycle()
         }
-        onView(withContentDescription(firstCell)).perform(click())
+        onView(withContentDescription(org.hamcrest.Matchers.startsWith("$firstCell, valor "))).perform(click())
         onView(isAssignableFrom(EditText::class.java)).perform(replaceText("37"), closeSoftKeyboard())
         onView(withText("Aplicar")).perform(click())
         activity.scenario.onActivity { a ->
@@ -118,16 +140,17 @@ class MapAndSettingsTest {
         onView(withHint("Buscar parâmetro ou diálogo")).perform(scrollTo(), replaceText("flexFuel"), closeSoftKeyboard())
         onView(withText("Fuel Sensor Settings")).perform(scrollTo(), click())
         onView(withText("Flex Fuel Adjustments")).perform(scrollTo(), click())
-        onView(withContentDescription("flexFuelBins [0]")).check { view, error ->
+        onView(withContentDescription(org.hamcrest.Matchers.startsWith("flexFuelBins [0], valor "))).check { view, error ->
             if (error != null) throw error
             val cells = descendants(view.rootView).filter { it.contentDescription?.startsWith("flexFuelBins [") == true || it.contentDescription?.startsWith("flexFuelAdj [") == true }
             assertEquals(12, cells.size)
-            cells.forEach { cell ->
-                val rect = Rect()
-                assertTrue(cell.getGlobalVisibleRect(rect))
-                assertEquals(cell.height, rect.height())
-                assertEquals(cell.width, rect.width())
-            }
+            val scroll = descendants(view.rootView).filterIsInstance<MapViewport>().single()
+                .let(::descendants).filterIsInstance<ScrollView>().single()
+            scroll.scrollTo(0, scroll.getChildAt(0).height)
+            val rect = Rect()
+            assertTrue(view.getGlobalVisibleRect(rect))
+            assertEquals(view.height, rect.height())
+            assertEquals(view.width, rect.width())
             val ys = cells.filter { it.contentDescription?.startsWith("flexFuelBins [") == true }
                 .map { IntArray(2).also(it::getLocationOnScreen)[1] }
             assertEquals(ys.maxOrNull(), IntArray(2).also(view::getLocationOnScreen)[1])

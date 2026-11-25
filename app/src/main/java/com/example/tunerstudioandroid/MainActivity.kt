@@ -8,7 +8,11 @@ import android.content.*
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
+import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
+import android.text.TextUtils
 import android.hardware.usb.UsbManager
 import android.net.Uri
 import android.os.*
@@ -52,6 +56,17 @@ class MainActivity : AppCompatActivity() {
     private lateinit var detail: TextView
     private val handler = Handler(Looper.getMainLooper())
     private var tab = "Painel"
+    private var pageScroll: ScrollView? = null
+    private val pageOffsets = mutableMapOf<String, Int>()
+    private var renderedTab: String? = null
+    private var mapQuery = ""
+    private var settingsQuery = ""
+    private var mapDialog: android.app.Dialog? = null
+    private var mapId: String? = null
+    private var mapViewport: MapViewport? = null
+    private var mapPosition: MapViewport.Position? = null
+    private val wide get() = resources.configuration.screenWidthDp >= 600 ||
+        resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     private var gauge: GaugeView? = null
     private var dashView: PanelSurface? = null
     private var fullDashView: PanelSurface? = null
@@ -83,10 +98,12 @@ class MainActivity : AppCompatActivity() {
     private var lastLog = 0L
     private var layout = "Verde"
     private val extrema = mutableMapOf<String, Pair<Double,Double>>()
-    private val bg = Color.rgb(11,17,24)
-    private val panel = Color.rgb(19,30,40)
-    private val muted = Color.rgb(151,168,185)
-    private val teal = Color.rgb(36,197,176)
+    private val bg = Color.rgb(9, 15, 22)
+    private val panel = Color.rgb(20, 30, 43)
+    private val raised = Color.rgb(30, 44, 59)
+    private val muted = Color.rgb(173, 191, 207)
+    private val teal = Color.rgb(106, 232, 201)
+    private val amber = Color.rgb(255, 199, 112)
     private val permissionAction get() = "$packageName.USB_PERMISSION"
     private val usb get() = getSystemService(UsbManager::class.java)
     private val refresh = object : Runnable {
@@ -113,6 +130,11 @@ class MainActivity : AppCompatActivity() {
         model = ViewModelProvider(this)[StudioModel::class.java]
         phone = PhoneSensors(this).apply { onGpsFix = { session.gpsFix = it } }
         tab = savedInstanceState?.getString("tab") ?: "Painel"
+        savedInstanceState?.getBundle("pageOffsets")?.let { offsets ->
+            offsets.keySet().forEach { pageOffsets[it] = offsets.getInt(it) }
+        }
+        mapQuery = savedInstanceState?.getString("mapQuery").orEmpty()
+        settingsQuery = savedInstanceState?.getString("settingsQuery").orEmpty()
         pendingDocument = savedInstanceState?.getInt("document") ?: 0
         pendingUsb = savedInstanceState?.getBundle("pendingUsb")
         usbPermissionDenied = savedInstanceState?.getBoolean("usbPermissionDenied") == true
@@ -126,6 +148,13 @@ class MainActivity : AppCompatActivity() {
         ContextCompat.registerReceiver(this, usbReceiver, IntentFilter(permissionAction), ContextCompat.RECEIVER_NOT_EXPORTED)
         bindSession()
         render()
+        savedInstanceState?.getString("mapId")?.let { id ->
+            mapPosition = MapViewport.Position(savedInstanceState.getInt("mapX"), savedInstanceState.getInt("mapY"))
+            when {
+                id.startsWith("table:") -> session.ini.tables.values.find { it.id == id.removePrefix("table:") }?.let(::tableEditor)
+                id.startsWith("curve:") -> session.ini.curves.values.find { it.id == id.removePrefix("curve:") }?.let(::curveEditor)
+            }
+        }
         if(savedInstanceState?.getBoolean("fullscreen") == true) handler.post { showFullDashboard() }
         if(savedInstanceState?.getBoolean("triggerLogger") == true) handler.post { showTriggerLogger() }
     }
@@ -158,11 +187,20 @@ class MainActivity : AppCompatActivity() {
         }
         super.onStop()
     }
-    override fun onDestroy() { triggerDialog?.setOnDismissListener(null); triggerDialog?.dismiss(); fullScreenDialog?.dismiss(); usbOptionsDialog?.dismiss(); unregisterReceiver(usbReceiver); session.listener = null; super.onDestroy() }
+    override fun onDestroy() { mapDialog?.dismiss(); triggerDialog?.setOnDismissListener(null); triggerDialog?.dismiss(); fullScreenDialog?.dismiss(); usbOptionsDialog?.dismiss(); unregisterReceiver(usbReceiver); session.listener = null; super.onDestroy() }
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putBoolean("triggerLogger", triggerDialog?.isShowing == true)
         outState.putBoolean("fullscreen", fullScreenDialog?.isShowing == true)
         outState.putString("tab", tab)
+        renderedTab?.let { pageOffsets[it] = pageScroll?.scrollY ?: 0 }
+        outState.putBundle("pageOffsets", Bundle().apply { pageOffsets.forEach { (name, offset) -> putInt(name, offset) } })
+        outState.putString("mapQuery", mapQuery)
+        outState.putString("settingsQuery", settingsQuery)
+        outState.putString("mapId", mapId)
+        mapViewport?.position()?.let {
+            outState.putInt("mapX", it.x)
+            outState.putInt("mapY", it.y)
+        }
         outState.putInt("document", pendingDocument)
         outState.putBundle("pendingUsb", pendingUsb)
         outState.putBoolean("usbPermissionDenied", usbPermissionDenied)
@@ -175,23 +213,50 @@ class MainActivity : AppCompatActivity() {
     private fun text(value: String, size: Float = 15f, color: Int = Color.WHITE) = TextView(this).apply {
         text = value; textSize = size; setTextColor(color); setPadding(dp(4), dp(6), dp(4), dp(6))
     }
-    private fun title(value: String) { content.addView(text(value,25f).apply { typeface = Typeface.DEFAULT_BOLD }) }
-    private fun note(value: String) { content.addView(text(value,14f,muted)) }
-    private fun shape(color: Int, stroke: Boolean = false) = GradientDrawable().apply {
-        setColor(color); cornerRadius = dp(14).toFloat(); if (stroke) setStroke(dp(1), Color.rgb(43,61,76))
+    private fun title(value: String) = section(value, content, 27f)
+    private fun section(value: String, parent: LinearLayout, size: Float = 17f) {
+        parent.addView(text(value, size).apply {
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            ViewCompat.setAccessibilityHeading(this, true)
+            setPadding(0, dp(10), 0, dp(6))
+        })
     }
+    private fun note(value: String) { content.addView(text(value,14f,muted)) }
+    private fun shape(color: Int, stroke: Boolean = false, radius: Int = 14) = GradientDrawable().apply {
+        setColor(color); cornerRadius = dp(radius).toFloat(); if (stroke) setStroke(dp(1), Color.rgb(43,61,76))
+    }
+    private fun interactive(color: Int, border: Boolean = false, radius: Int = 14) = RippleDrawable(
+        ColorStateList.valueOf(0x446AE8C9), shape(color, border, radius), shape(Color.WHITE, radius = radius)
+    )
     private fun card(parent: LinearLayout = content) = column().apply {
-        background = shape(panel); setPadding(dp(12),dp(10),dp(12),dp(10))
+        background = shape(panel, true); setPadding(dp(12),dp(10),dp(12),dp(10))
         parent.addView(this, LinearLayout.LayoutParams(-1,-2).apply { setMargins(0,dp(6),0,dp(6)) })
     }
     private fun button(label: String, parent: LinearLayout = content, action: () -> Unit): Button {
         return Button(this).apply {
             text = label; isAllCaps = false; textSize = 14f; setTextColor(teal)
-            setBackgroundColor(panel); minHeight = dp(48)
+            background = interactive(raised, true)
+            minHeight = dp(48)
+            setPadding(dp(12), dp(8), dp(12), dp(8))
             setOnClickListener { if (!session.busy) action() else toast("Aguarde a operação atual") }
             parent.addView(this, LinearLayout.LayoutParams(-1,-2).apply { setMargins(0,dp(3),0,dp(3)) })
         }
     }
+    private fun panes(parent: LinearLayout = content): Pair<LinearLayout, LinearLayout> {
+        val first = column()
+        val second = column()
+        if (wide) {
+            val split = row().apply { gravity = Gravity.TOP }
+            split.addView(first, LinearLayout.LayoutParams(0, -2, 3f).apply { marginEnd = dp(16) })
+            split.addView(second, LinearLayout.LayoutParams(0, -2, 2f))
+            parent.addView(split, LinearLayout.LayoutParams(-1, -2))
+        } else {
+            parent.addView(first, LinearLayout.LayoutParams(-1, -2))
+            parent.addView(second, LinearLayout.LayoutParams(-1, -2))
+        }
+        return first to second
+    }
+
     private fun toast(message: String) { Toast.makeText(this,message,Toast.LENGTH_LONG).show() }
     private fun confirm(title: String, message: String, action: () -> Unit) {
         AlertDialog.Builder(this).setTitle(title).setMessage(message).setNegativeButton("Cancelar",null)
@@ -206,24 +271,68 @@ class MainActivity : AppCompatActivity() {
         else -> "Speeduino · ${session.ini.signature}"
     }
     private fun render() {
-        root.removeAllViews(); readouts.clear(); gauge = null; dashView = null; vssStatusText = null; speedText = null; sensorText = null
-        val heading = row().apply { setPadding(dp(16),dp(8),dp(16),dp(2)) }
-        heading.addView(text(getString(R.string.app_name),18f).apply { typeface = Typeface.DEFAULT_BOLD }, LinearLayout.LayoutParams(0,-2,1f))
-        status = text("OFFLINE",12f,teal); heading.addView(status)
-        root.addView(heading)
-        detail = text(connectionDetail(),12f,muted).apply { setPadding(dp(20),0,dp(20),dp(8)); maxLines=2 }
-        root.addView(detail)
-        val navigation = row()
-        listOf("Painel","Ajustes","Mapas","Logs","Conexão").forEach { name ->
-            Button(this).apply {
-                text=name; isAllCaps=false; textSize=13f; setTextColor(if(tab==name) teal else muted)
-                setBackgroundColor(bg); minWidth=dp(78)
-                setOnClickListener { tab=name; render() }; navigation.addView(this)
-            }
+        renderedTab?.let { pageOffsets[it] = pageScroll?.scrollY ?: 0 }
+        renderedTab = tab
+        root.removeAllViews()
+        readouts.clear(); gauge = null; dashView = null; vssStatusText = null; speedText = null; sensorText = null
+
+        val heading = row().apply { setPadding(dp(16), dp(4), dp(16), 0) }
+        heading.addView(text(getString(R.string.app_name), 19f).apply {
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        status = text("", 12f, teal).apply {
+            background = shape(raised)
+            setPadding(dp(10), dp(5), dp(10), dp(5))
+            typeface = Typeface.DEFAULT_BOLD
+            maxLines = 2
         }
-        root.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false; addView(navigation) })
-        content = column().apply { setPadding(dp(16),dp(8),dp(16),dp(24)) }
-        root.addView(ScrollView(this).apply { isFillViewport=true; addView(content) },LinearLayout.LayoutParams(-1,0,1f))
+        heading.addView(status)
+        root.addView(heading)
+        detail = text(connectionDetail(), 12f, muted).apply {
+            setPadding(dp(16), 0, dp(16), dp(8))
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        root.addView(detail)
+
+        val workspace = if (wide) row().apply {
+            gravity = Gravity.TOP
+            root.addView(this, LinearLayout.LayoutParams(-1, 0, 1f))
+        } else root
+        val navigation = if (wide) column() else row()
+        navigation.setBackgroundColor(panel)
+        navigation.setPadding(dp(4), dp(4), dp(4), dp(4))
+        listOf("Painel", "Ajustes", "Mapas", "Logs", "Conexão").forEach { name ->
+            val selected = tab == name
+            val item = Button(this).apply {
+                text = name
+                isAllCaps = false
+                textSize = 12f
+                setTextColor(if (selected) bg else muted)
+                background = interactive(if (selected) teal else panel)
+                isSelected = selected
+                minWidth = 0
+                minimumWidth = 0
+                minHeight = dp(48)
+                setPadding(dp(2), dp(4), dp(2), dp(4))
+                setOnClickListener { if (tab != name) { tab = name; render() } }
+            }
+            navigation.addView(item, (if (wide) LinearLayout.LayoutParams(-1, -2)
+                else LinearLayout.LayoutParams(0, -2, 1f)).apply { setMargins(dp(1), dp(2), dp(1), dp(2)) })
+        }
+        if (wide) workspace.addView(ScrollView(this).apply {
+            isFillViewport = true
+            addView(navigation)
+        }, LinearLayout.LayoutParams(dp(104), -1))
+
+        val gutter = if (wide) 24 else 16
+        content = column().apply { setPadding(dp(gutter), dp(4), dp(gutter), dp(24)) }
+        val scroll = ScrollView(this).apply { isFillViewport = true; addView(content) }
+        pageScroll = scroll
+        workspace.addView(scroll, if (wide) LinearLayout.LayoutParams(0, -1, 1f)
+            else LinearLayout.LayoutParams(-1, 0, 1f))
+        if (!wide) root.addView(navigation)
+        pageOffsets[tab]?.let { offset -> scroll.post { scroll.scrollTo(0, offset) } }
         when(tab) {
             "Painel" -> dashboard()
             "Ajustes" -> settings()
@@ -271,20 +380,22 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val entry=store.entries.getOrNull(selected) ?: return
+        val (instruments, actions) = panes()
         dashView=newDashView(entry)
-        content.addView(dashView?.view,LinearLayout.LayoutParams(-1,-2))
-        button("Tela cheia") { showFullDashboard() }
-        val phoneCard=card()
-        val speedLine=row()
+        instruments.addView(dashView?.view,LinearLayout.LayoutParams(-1,-2))
+        button("Tela cheia", instruments) { showFullDashboard() }
+        val phoneCard=card(actions)
+        section("Velocidade e sensores", phoneCard)
+        val speedLine=if (wide) column() else row()
         speedText=text("— km/h",26f,teal)
-        speedLine.addView(speedText,LinearLayout.LayoutParams(0,-2,1f))
+        speedLine.addView(speedText, if (wide) LinearLayout.LayoutParams(-1,-2) else LinearLayout.LayoutParams(0,-2,1f))
         sensorText=text(phone.gpsStatus,12f,muted)
-        speedLine.addView(sensorText,LinearLayout.LayoutParams(0,-2,1f));phoneCard.addView(speedLine)
+        speedLine.addView(sensorText, if (wide) LinearLayout.LayoutParams(-1,-2) else LinearLayout.LayoutParams(0,-2,1f));phoneCard.addView(speedLine)
         vssStatusText=text(vssStatus(),12f,muted);phoneCard.addView(vssStatusText)
         button("VSS Mode e GPS",phoneCard) { editVss {} }
         button("Autorizar GPS e sensores",phoneCard) { locationPermission() }
-        button("Importar painel (.dash ou RealDash)") { openDocument(IMPORT_DASH,"*/*") }
-        button("Detalhes do painel") {
+        button("Importar painel (.dash ou RealDash)", actions) { openDocument(IMPORT_DASH,"*/*") }
+        button("Detalhes do painel", actions) {
             val definition=entry.definition
             val format = when {
                 entry.vehicle != null -> "Painel personalizado"
@@ -298,7 +409,7 @@ class MainActivity : AppCompatActivity() {
                 "\n\nToque no ícone de log para gravar. Segure um instrumento para inspecionar. Use dois dedos para ampliar; toque duas vezes para restaurar a escala."
             AlertDialog.Builder(this).setTitle(format).setMessage(info).setPositiveButton("Fechar",null).show()
         }
-        button("Mínimos / máximos do painel") {
+        button("Mínimos / máximos do painel", actions) {
             AlertDialog.Builder(this).setTitle("Sessão do painel").setMessage(dashView?.extrema()?.joinToString("\n").orEmpty().ifBlank { "Sem dados disponíveis" })
                 .setPositiveButton("Fechar",null).setNeutralButton("Zerar") { _,_ -> dashView?.resetHistory();fullDashView?.resetHistory() }.show()
         }
@@ -320,7 +431,7 @@ class MainActivity : AppCompatActivity() {
     private fun showFullDashboard() {
         if(fullScreenDialog?.isShowing==true)return
         val entry=session.dashboards.entries.firstOrNull { it.id==session.dashboards.selectedId } ?: return
-        val dialog=android.app.Dialog(this,com.google.android.material.R.style.Theme_MaterialComponents_NoActionBar)
+        val dialog=android.app.Dialog(this,R.style.Theme_TunerStudioAndroid)
         val frame=column().apply { setBackgroundColor(Color.BLACK) }
         val controls=row()
         fullScreenStatus=text("${status.text} · ${entry.label}",11f,muted).apply { maxLines=1 }
@@ -330,7 +441,7 @@ class MainActivity : AppCompatActivity() {
             text="×";contentDescription="Sair da tela cheia";textSize=24f;setTextColor(Color.WHITE);background=shape(0x880B1118.toInt())
             setOnClickListener { dialog.dismiss() }
         }
-        controls.addView(close,LinearLayout.LayoutParams(dp(48),dp(36)))
+        controls.addView(close,LinearLayout.LayoutParams(dp(48),dp(48)))
         frame.addView(controls)
         frame.addView(view.view,LinearLayout.LayoutParams(-1,0,1f))
         dialog.setContentView(frame)
@@ -393,7 +504,7 @@ class MainActivity : AppCompatActivity() {
         top.addView(styles); content.addView(top)
         val instrumentCard = card()
         gauge = GaugeView(this)
-        instrumentCard.addView(gauge,LinearLayout.LayoutParams(-1,dp(245)))
+        instrumentCard.addView(gauge,LinearLayout.LayoutParams(-1,dp(if (wide) 176 else 245)))
         val speedRow=row()
         val speedBox=column()
         speedBox.addView(text("VELOCIDADE DO CELULAR",11f,muted))
@@ -402,7 +513,7 @@ class MainActivity : AppCompatActivity() {
         sensorText=text("Aguardando GPS",12f,muted); sensorText!!.gravity=Gravity.END
         speedRow.addView(sensorText,LinearLayout.LayoutParams(0,-2,1f)); instrumentCard.addView(speedRow)
         val cells=listOf("map" to "MAP · kPa","tps" to "TPS · %","afr" to "AFR","coolant" to "Motor · °C","iat" to "Admissão · °C","batteryVoltage" to "Bateria · V","advance" to "Avanço · °","pulseWidth" to "Injeção · ms")
-        cells.chunked(2).forEach { pair ->
+        cells.chunked(if (wide) 4 else 2).forEach { pair ->
             val line=row()
             pair.forEach { (key,label) ->
                 val box=column().apply { background=shape(panel); setPadding(dp(12),dp(10),dp(12),dp(10)) }
@@ -424,14 +535,22 @@ class MainActivity : AppCompatActivity() {
     private fun fmt(value: Double) = String.format(Locale.getDefault(),"%.1f",value)
     private fun updateReadings() {
         if (!::status.isInitialized) return
-        status.text=when {
+        val state = when {
             session.busy -> "AGUARDE"
             session.transport.isSimulator -> "DEMONSTRAÇÃO"
             session.fresh -> "CONECTADO"
             session.transport.isConnected -> "SEM TELEMETRIA"
             else -> "OFFLINE"
         }
-        detail.text=connectionDetail() + if(session.ecu.isDirty) " · alterações pendentes" else ""
+        if (status.text.toString() != state) status.text = state
+        val statusColor = when (state) {
+            "AGUARDE", "SEM TELEMETRIA" -> amber
+            "CONECTADO", "DEMONSTRAÇÃO" -> teal
+            else -> muted
+        }
+        if (status.currentTextColor != statusColor) status.setTextColor(statusColor)
+        val connection = (if (session.ecu.isDirty) "Alterações pendentes · " else "") + connectionDetail()
+        if (detail.text.toString() != connection) detail.text = connection
         if(fullScreenDialog?.isShowing==true)fullDashView?.refresh() else dashView?.refresh()
         fullScreenStatus?.text="${status.text} · ${vssStatus()}"
         vssStatusText?.text=vssStatus()
@@ -441,6 +560,7 @@ class MainActivity : AppCompatActivity() {
         speedText?.text=speed?.let { "${fmt(it.kmh)} km/h" } ?: "— km/h"
         sensorText?.text="${speed?.source ?: phone.gpsStatus}\n${phone.acceleration?.let { "${fmt(it)} m/s²" } ?: if(phone.hasAccelerometer) "Aguardando acelerômetro" else "Aceleração indisponível"}"
         readouts.forEach { (key,view) ->
+            if (key == "logCount") return@forEach
             val value=when(key) {
                 "coolant" -> session.channel("coolantRaw")?.minus(40)
                 "iat" -> session.channel("iatRaw")?.minus(40)
@@ -465,28 +585,34 @@ class MainActivity : AppCompatActivity() {
 
     private fun settings() {
         title("Ajustes da ECU")
-        button("VSS Mode e GPS") { editVss {} }
-        note("Edições ficam na cópia local. Use Gravar na ECU para transmitir, conferir a leitura e persistir as páginas alteradas.")
-        button("Gravar na ECU") {
+        val (parameters, tools) = panes()
+        val ecuActions = card(tools)
+        section("Memória da ECU", ecuActions)
+        ecuActions.addView(text("Edite na cópia local. Grave na ECU para transmitir e verificar as páginas alteradas.", 13f, muted))
+        button("Gravar na ECU", ecuActions) {
             if(!session.transport.isConnected) toast("Conecte uma ECU ou inicie a demonstração")
             else if(session.gpsVssEnabled && session.gpsVssStatus==GpsVssBridge.Status.UNSUPPORTED) toast("Instale a extensão GPS VSS na ECU ou escolha uma fonte VSS nativa antes de gravar.")
             else confirm("Gravar ${session.ecu.dirtyPages().size} página(s)?", "As alterações locais serão transmitidas, verificadas e gravadas na memória da ECU.") {
                 session.runOperation({ session.transport.burnDirty(); session.saveSession() })
             }
         }
-        button("Ler novamente da ECU") {
+        button("Ler novamente da ECU", ecuActions) {
             confirm("Ler páginas da ECU", "Esta leitura substituirá os ajustes locais pelas páginas da ECU conectada.") {
                 session.runOperation({ session.transport.downloadPages(); session.saveSession() }, { render() })
             }
         }
-        val fileRow=card()
+        val fileRow=card(tools)
+        section("Arquivos e ferramentas", fileRow)
+        button("VSS Mode e GPS",fileRow) { editVss {} }
         button("Abrir ajuste MSQ",fileRow) { openDocument(IMPORT_MSQ,"*/*") }
         button("Salvar ajuste MSQ",fileRow) { createDocument(EXPORT_MSQ,"application/xml","speeduino.msq") }
         button("Calculadora de combustível requerido",fileRow) { requiredFuel() }
-        val search=EditText(this).apply { hint="Buscar parâmetro ou diálogo"; setSingleLine(); setTextColor(Color.WHITE); setHintTextColor(muted) }
-        content.addView(search)
-        val list=column(); content.addView(list)
+        section("Parâmetros", parameters)
+        val search = searchField("Buscar parâmetro ou diálogo", settingsQuery)
+        parameters.addView(search)
+        val list=column(); parameters.addView(list)
         fun populate(query:String) {
+            settingsQuery = query
             list.removeAllViews()
             val nested=session.ini.dialogs.values.flatMap { it.items }.filter { it.type==IniModel.Item.Type.PANEL }.map { it.constant }.toSet()
             val dialogs=session.ini.dialogs.values.filter {
@@ -497,12 +623,13 @@ class MainActivity : AppCompatActivity() {
             if(query.isNotBlank()) session.ini.constants.values.filter { !it.isArray && it.name.contains(query,true) }.forEach { c ->
                 button("${c.name} · ${session.ecu.display(c.name)} ${session.ecu.units(c)}",list) { edit(c,0) { populate(search.text.toString()) } }
             }
+            if (list.childCount == 0) list.addView(text("Nenhum parâmetro encontrado.", 14f, muted))
         }
         search.addTextChangedListener(object:TextWatcher {
             override fun beforeTextChanged(s:CharSequence?,start:Int,count:Int,after:Int) { }
             override fun onTextChanged(s:CharSequence?,start:Int,before:Int,count:Int) { populate(s.toString()) }
             override fun afterTextChanged(s:Editable?) { }
-        }); populate("")
+        }); populate(settingsQuery)
     }
     private fun showIniDialog(id: String) {
         val body=column().apply { setPadding(dp(16),dp(8),dp(16),dp(16)) }
@@ -550,7 +677,7 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this).setTitle(session.ini.dialogs[id]?.title ?: id)
             .setView(ScrollView(this).apply { addView(body) }).setPositiveButton("Fechar",null).show()
     }
-    private fun edit(c: IniModel.Constant, index: Int, after: () -> Unit) {
+    private fun edit(c: IniModel.Constant, index: Int, coordinates: String? = null, after: () -> Unit) {
         if(session.busy) { toast("Aguarde a operação atual"); return }
         if(c.name=="vssMode") { editVss(after);return }
         if(c.isBits && c.options.isNotEmpty()) {
@@ -566,7 +693,9 @@ class MainActivity : AppCompatActivity() {
         }
         val low=session.ecu.num(c.loRaw,Double.NaN); val high=session.ecu.num(c.hiRaw,Double.NaN)
         val dialog=AlertDialog.Builder(this).setTitle("${c.name}${if(c.isArray) " [$index]" else ""}")
-            .setMessage("${session.ecu.units(c)} · faixa $low a $high").setView(input)
+            .setMessage(listOfNotNull(coordinates, session.ecu.units(c).takeIf { it.isNotBlank() },
+                if (low.isFinite() && high.isFinite() && high > low) "Faixa: ${session.ecu.format(c, low)} a ${session.ecu.format(c, high)}" else null)
+                .joinToString("\n").ifBlank { "Informe o novo valor." }).setView(input)
             .setNegativeButton("Cancelar",null).setPositiveButton("Aplicar",null).create()
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
@@ -577,102 +706,197 @@ class MainActivity : AppCompatActivity() {
             }
         }; dialog.show()
     }
+    private fun searchField(label: String, query: String) = EditText(this).apply {
+        hint = label
+        setSingleLine()
+        setTextColor(Color.WHITE)
+        setHintTextColor(muted)
+        minHeight = dp(52)
+        background = shape(panel, true)
+        setPadding(dp(12), dp(8), dp(12), dp(8))
+        setText(query)
+    }
+
     private fun maps() {
         title("Mapas e curvas")
-        note("Toque em uma célula para editar. Os eixos preservam os endereços e as unidades definidos no INI.")
-        val tables=session.ini.tables.values.distinctBy { it.zBins }
-        tables.forEach { table -> button(table.title.ifBlank { table.id }) { tableEditor(table) } }
-        session.ini.curves.values.forEach { curve -> button(curve.title.ifBlank { curve.id }) { curveEditor(curve) } }
+        val search = searchField("Buscar mapa ou curva", mapQuery)
+        content.addView(search)
+        val results = column().also { content.addView(it) }
+        val tables = session.ini.tables.values.distinctBy { it.zBins }
+        fun populate(query: String) {
+            mapQuery = query
+            val filter = query.trim()
+            results.removeAllViews()
+            val foundTables = tables.filter {
+                it.title.contains(filter, true) || it.id.contains(filter, true) || it.zBins.contains(filter, true)
+            }
+            val foundCurves = session.ini.curves.values.filter {
+                it.title.contains(filter, true) || it.id.contains(filter, true) || it.yBins.contains(filter, true)
+            }
+            if (foundTables.isEmpty() && foundCurves.isEmpty()) {
+                results.addView(text("Nenhum mapa ou curva encontrado.", 14f, muted))
+                return
+            }
+            val (tableList, curveList) = if (foundTables.isNotEmpty() && foundCurves.isNotEmpty()) panes(results) else results to results
+            if (foundTables.isNotEmpty()) {
+                section("Tabelas", tableList)
+                foundTables.forEach { table -> button(table.title.ifBlank { table.id }, tableList) { tableEditor(table) } }
+            }
+            if (foundCurves.isNotEmpty()) {
+                section("Curvas", curveList)
+                foundCurves.forEach { curve -> button(curve.title.ifBlank { curve.id }, curveList) { curveEditor(curve) } }
+            }
+        }
+        search.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = populate(s.toString())
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
+        populate(mapQuery)
     }
-    private fun fittedMap(title:String,help:String,build:(LinearLayout)->Unit) {
-        val dialog=android.app.Dialog(this,com.google.android.material.R.style.Theme_MaterialComponents_NoActionBar)
-        val frame=column().apply { setBackgroundColor(bg); setPadding(dp(4),0,dp(4),0) }
-        val heading=row()
-        heading.addView(text(title,18f),LinearLayout.LayoutParams(0,-2,1f))
-        button("Fechar",heading) { dialog.dismiss() }.layoutParams=LinearLayout.LayoutParams(dp(80),dp(48))
+
+    private fun fittedMap(id: String, title: String, help: String, build: (MapViewport) -> Unit) {
+        val dialog = android.app.Dialog(this, R.style.Theme_TunerStudioAndroid)
+        val frame = column().apply { setBackgroundColor(bg) }
+        val heading = row().apply { gravity = Gravity.CENTER_VERTICAL }
+        heading.addView(text(title, 19f).apply {
+            typeface = Typeface.DEFAULT_BOLD
+            ViewCompat.setAccessibilityHeading(this, true)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        heading.addView(Button(this).apply {
+            text = "Fechar"
+            isAllCaps = false
+            setTextColor(teal)
+            background = interactive(raised)
+            minHeight = dp(48)
+            setOnClickListener { dialog.dismiss() }
+        })
         frame.addView(heading)
-        frame.addView(text(help,11f,muted))
-        val grid=column()
-        frame.addView(grid,LinearLayout.LayoutParams(-1,0,1f))
-        build(grid)
+        frame.addView(text(help, 13f, muted))
+        val viewport = MapViewport(this)
+        frame.addView(viewport, LinearLayout.LayoutParams(-1, 0, 1f))
+        build(viewport)
+        viewport.restore(mapPosition ?: MapViewport.Position(0, if (id.startsWith("table:")) Int.MAX_VALUE else 0))
         dialog.setContentView(frame)
-        ViewCompat.setOnApplyWindowInsetsListener(frame) { view,insets ->
-            val bars=insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
-            view.setPadding(bars.left+dp(4),bars.top,bars.right+dp(4),bars.bottom); insets
+        ViewCompat.setOnApplyWindowInsetsListener(frame) { view, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            view.setPadding(bars.left + dp(8), bars.top, bars.right + dp(8), bars.bottom + dp(8))
+            insets
+        }
+        mapId = id
+        mapDialog = dialog
+        mapViewport = viewport
+        dialog.setOnDismissListener {
+            mapDialog = null
+            mapId = null
+            mapViewport = null
+            mapPosition = null
         }
         dialog.show()
-        dialog.window?.setLayout(-1,-1)
+        dialog.window?.setLayout(-1, -1)
     }
-    private fun mapCell(line:LinearLayout,label:String,color:Int,description:String,backgroundColor:Int=panel,action:(()->Unit)?=null) {
-        val view=text(label,12f,color).apply {
-            gravity=Gravity.CENTER; setPadding(0,0,0,0); maxLines=1
-            contentDescription=description
-            setBackgroundColor(backgroundColor)
-            androidx.core.widget.TextViewCompat.setAutoSizeTextTypeUniformWithConfiguration(this,3,14,1,android.util.TypedValue.COMPLEX_UNIT_SP)
-            if(action!=null) { isFocusable=true; setOnClickListener { action() } }
+
+    private fun mapCell(label: String, color: Int, description: String, fill: Int = panel,
+                        action: (() -> Unit)? = null): TextView {
+        val cell = if (action == null) TextView(this) else Button(this).apply {
+            isAllCaps = false
+            minWidth = 0
+            minimumWidth = 0
+            minHeight = 0
+            minimumHeight = 0
+            setOnClickListener {
+                if (session.busy) toast("Aguarde a operação atual") else action()
+            }
         }
-        line.addView(view,LinearLayout.LayoutParams(0,-1,1f).apply { setMargins(1,1,1,1) })
+        return cell.apply {
+            text = label
+            textSize = 14f
+            setTextColor(color)
+            gravity = Gravity.CENTER
+            typeface = Typeface.MONOSPACE
+            setPadding(dp(4), 0, dp(4), 0)
+            contentDescription = description
+            background = if (action == null) shape(fill, radius = 6) else interactive(fill, radius = 6)
+        }
     }
+
     private fun tableEditor(table: IniModel.Table) {
-        val c=session.ini.constant(table.zBins) ?: return
-        fittedMap(table.title.ifBlank { table.id },"${table.yLabel} ↑ / ${table.xLabel} → · toque na célula ou no eixo para editar") { grid ->
+        val c = session.ini.constant(table.zBins) ?: return
+        val xAxis = session.ini.constant(table.xBins)
+        val yAxis = session.ini.constant(table.yBins)
+        val units = session.ecu.units(c)
+        val help = "${table.yLabel} ↑  ·  ${table.xLabel} →" +
+            (if (units.isBlank()) "" else "  ·  $units") + "\nDeslize pela grade. Toque em um valor para editar."
+        fittedMap("table:${table.id}", table.title.ifBlank { table.id }, help) { viewport ->
             fun populate() {
-                grid.removeAllViews()
-                val xs=session.ecu.array(table.xBins); val ys=session.ecu.array(table.yBins)
-                fun axisLabel(name:String,value:Double) = session.ini.constant(name)?.let { session.ecu.format(it,value) } ?: fmt(value)
-                val cols=(0 until c.cols()).sortedBy { xs.getOrElse(it) { it.toDouble() } }
-                val rows=(0 until c.rows()).sortedByDescending { ys.getOrElse(it) { it.toDouble() } }
-                val lo=session.ecu.num(c.loRaw,0.0); val hi=session.ecu.num(c.hiRaw,255.0)
-                rows.forEach { y ->
-                    val line=row()
-                    val yValue=ys.getOrElse(y) { y.toDouble() }
-                    mapCell(line,axisLabel(table.yBins,yValue),teal,"${table.yBins} [$y]") {
-                        session.ini.constant(table.yBins)?.let { edit(it,y) { populate() } }
-                    }
-                    cols.forEach { x ->
-                        val index=y*c.cols()+x
-                        val value=session.ecu.get(c,index)
-                        val hue=(210-190*((value-lo)/(hi-lo).coerceAtLeast(1.0)).coerceIn(0.0,1.0)).toFloat()
-                        mapCell(line,session.ecu.format(c,value),Color.WHITE,
-                            "${c.name}, ${table.xLabel} ${xs.getOrElse(x){x.toDouble()}}, ${table.yLabel} $yValue",
-                            Color.HSVToColor(floatArrayOf(hue,0.50f,0.38f))) {
-                            edit(c,index) { populate() }
+                val position = viewport.position()
+                val xs = session.ecu.array(table.xBins)
+                val ys = session.ecu.array(table.yBins)
+                fun axisLabel(axis: IniModel.Constant?, value: Double) = axis?.let { session.ecu.format(it, value) } ?: fmt(value)
+                val cols = (0 until c.cols()).sortedBy { xs.getOrElse(it) { it.toDouble() } }
+                val rows = (0 until c.rows()).sortedByDescending { ys.getOrElse(it) { it.toDouble() } }
+                val values = rows.flatMap { y -> cols.map { x -> session.ecu.get(c, y * c.cols() + x) } }.filter { it.isFinite() }
+                val lo = values.minOrNull() ?: 0.0
+                val span = ((values.maxOrNull() ?: lo) - lo).coerceAtLeast(1e-9)
+
+                fun header(axis: IniModel.Constant?, name: String, index: Int, value: Double): TextView {
+                    val label = axisLabel(axis, value)
+                    return mapCell(label, teal, "$name [$index], $label", raised, axis?.let {
+                        { edit(it, index, "$name · $label") { populate() } }
+                    })
+                }
+
+                viewport.table(
+                    mapCell("Y / X", muted, "Eixos ${table.yLabel} e ${table.xLabel}", raised),
+                    cols.map { x -> header(xAxis, table.xBins, x, xs.getOrElse(x) { x.toDouble() }) },
+                    rows.map { y -> header(yAxis, table.yBins, y, ys.getOrElse(y) { y.toDouble() }) },
+                    rows.map { y ->
+                        cols.map { x ->
+                            val index = y * c.cols() + x
+                            val value = session.ecu.get(c, index)
+                            val ratio = if (value.isFinite() && span > 1e-9) ((value - lo) / span).coerceIn(0.0, 1.0) else 0.0
+                            val hue = (207 - 175 * ratio).toFloat()
+                            val xValue = xs.getOrElse(x) { x.toDouble() }
+                            val yValue = ys.getOrElse(y) { y.toDouble() }
+                            val label = session.ecu.format(c, value)
+                            val coordinates = "${table.xLabel} ${axisLabel(xAxis, xValue)} · ${table.yLabel} ${axisLabel(yAxis, yValue)}"
+                            mapCell(label, Color.WHITE, "${c.name}, ${table.xLabel} $xValue, ${table.yLabel} $yValue, valor $label",
+                                Color.HSVToColor(floatArrayOf(hue, 0.62f, 0.38f))) {
+                                edit(c, index, coordinates) { populate() }
+                            }
                         }
                     }
-                    grid.addView(line,LinearLayout.LayoutParams(-1,0,1f))
-                }
-                val axis=row()
-                mapCell(axis,"Y / X",muted,"Eixos ${table.yLabel} / ${table.xLabel}")
-                cols.forEach { x ->
-                    mapCell(axis,axisLabel(table.xBins,xs.getOrElse(x){x.toDouble()}),teal,"${table.xBins} [$x]") {
-                        session.ini.constant(table.xBins)?.let { edit(it,x) { populate() } }
-                    }
-                }
-                grid.addView(axis,LinearLayout.LayoutParams(-1,0,1f))
+                )
+                viewport.restore(position)
             }
             populate()
         }
     }
+
     private fun curveEditor(curve: IniModel.Curve) {
-        val x=session.ini.constant(curve.xBins) ?: return
-        val y=session.ini.constant(curve.yBins) ?: return
-        fittedMap(curve.title.ifBlank { curve.id },"${curve.xBins} ↑ / ${curve.yBins} · toque em um valor para editar") { grid ->
+        val x = session.ini.constant(curve.xBins) ?: return
+        val y = session.ini.constant(curve.yBins) ?: return
+        fittedMap("curve:${curve.id}", curve.title.ifBlank { curve.id }, "Toque em um ponto para editar seu valor.") { viewport ->
             fun populate() {
-                grid.removeAllViews()
-                val indices=(0 until min(x.length(),y.length())).sortedByDescending { session.ecu.get(x,it) }
-                indices.forEach { index ->
-                    val line=row()
-                    listOf(x,y).forEach { c ->
-                        mapCell(line,session.ecu.format(c,session.ecu.get(c,index)),Color.WHITE,"${c.name} [$index]") {
-                            edit(c,index) { populate() }
+                val position = viewport.position()
+                val axes = listOf(x, y)
+                val labels = axes.mapIndexed { index, axis ->
+                    listOf(curve.columnLabels.getOrElse(index) { axis.name }, session.ecu.units(axis))
+                        .filter { it.isNotBlank() }.joinToString(" · ")
+                }
+                val indices = (0 until min(x.length(), y.length())).sortedByDescending { session.ecu.get(x, it) }
+                viewport.curve(
+                    labels.map { mapCell(it, teal, it, raised) },
+                    indices.map { index ->
+                        axes.mapIndexed { axisIndex, c ->
+                            val label = session.ecu.format(c, session.ecu.get(c, index))
+                            mapCell(label, Color.WHITE, "${c.name} [$index], valor $label") {
+                                edit(c, index, labels[axisIndex]) { populate() }
+                            }
                         }
                     }
-                    grid.addView(line,LinearLayout.LayoutParams(-1,0,1f))
-                }
-                val labels=row()
-                mapCell(labels,curve.columnLabels.getOrElse(0){curve.xBins},teal,"Eixo ${curve.xBins}")
-                mapCell(labels,curve.columnLabels.getOrElse(1){curve.yBins},teal,"Eixo ${curve.yBins}")
-                grid.addView(labels,LinearLayout.LayoutParams(-1,0,1f))
+                )
+                viewport.restore(position)
             }
             populate()
         }
@@ -719,28 +943,32 @@ class MainActivity : AppCompatActivity() {
 
     private fun logging() {
         title("Registro de dados")
-        button("Tooth / Composite Logger") { showTriggerLogger() }
-        val count=text("${session.log.size} amostras",22f,teal); readouts["logCount"]=count; content.addView(count)
-        note("Aquisição a 5 Hz enquanto o aplicativo está visível. CSV com RPM, MAP, TPS, temperatura em °C, AFR, alvo AFR, Gego, GPS e aceleração. Campos indisponíveis ficam vazios.")
-        button(if(session.recording) "Parar gravação" else "Iniciar gravação") {
+        val (recording, diagnostics) = panes()
+        val recorder = card(recording)
+        section("Telemetria", recorder)
+        section("Diagnóstico", diagnostics)
+        button("Tooth / Composite Logger", diagnostics) { showTriggerLogger() }
+        val count=text("${session.log.size} amostras",22f,teal); readouts["logCount"]=count; recorder.addView(count)
+        recorder.addView(text("Aquisição a 5 Hz enquanto o aplicativo está visível. CSV com RPM, MAP, TPS, temperatura em °C, AFR, alvo AFR, Gego, GPS e aceleração. Campos indisponíveis ficam vazios.", 14f, muted))
+        button(if(session.recording) "Parar gravação" else "Iniciar gravação", recorder) {
             toggleRecording(); render()
         }
-        button("Exportar CSV") { session.recording=false; createDocument(EXPORT_CSV,"text/csv","speeduino-log.csv") }
-        button("Limpar registro") { confirm("Limpar registro", "Descartar ${session.log.size} amostras da sessão?") { session.recording=false; session.log.clear(); render() } }
-        button("Analisar combustível de um CSV") { openDocument(ADVISOR,"*/*") }
-        note("A análise usa o assessor do projeto original: motor aquecido, trechos estáveis e revisão por região. As sugestões não alteram o mapa automaticamente.")
-        button("Histórico da comunicação") {
+        button("Exportar CSV", recorder) { session.recording=false; createDocument(EXPORT_CSV,"text/csv","speeduino-log.csv") }
+        button("Limpar registro", recorder) { confirm("Limpar registro", "Descartar ${session.log.size} amostras da sessão?") { session.recording=false; session.log.clear(); render() } }
+        button("Analisar combustível de um CSV", diagnostics) { openDocument(ADVISOR,"*/*") }
+        diagnostics.addView(text("A análise usa o assessor do projeto original: motor aquecido, trechos estáveis e revisão por região. As sugestões não alteram o mapa automaticamente.", 14f, muted))
+        button("Histórico da comunicação", diagnostics) {
             AlertDialog.Builder(this).setTitle("Comunicação").setMessage(session.history.joinToString("\n").ifBlank{"Sem eventos"}).setPositiveButton("Fechar",null).show()
         }
     }
     private fun showTriggerLogger() {
         if(triggerDialog?.isShowing==true) return
-        val dialog=android.app.Dialog(this,com.google.android.material.R.style.Theme_MaterialComponents_NoActionBar)
+        val dialog=android.app.Dialog(this,R.style.Theme_TunerStudioAndroid)
         val frame=column().apply { setBackgroundColor(bg);setPadding(dp(6),0,dp(6),0) }
         val heading=row()
-        heading.addView(text("TOOTH / COMPOSITE LOGGER",16f),LinearLayout.LayoutParams(0,dp(40),1f))
+        heading.addView(text("TOOTH / COMPOSITE LOGGER",16f),LinearLayout.LayoutParams(0,-2,1f))
         val close=Button(this).apply { text="Fechar";isAllCaps=false;setTextColor(teal);setOnClickListener { dialog.dismiss() } }
-        heading.addView(close,LinearLayout.LayoutParams(dp(76),dp(40)));frame.addView(heading)
+        heading.addView(close,LinearLayout.LayoutParams(dp(80),dp(48)));frame.addView(heading)
         val config=row()
         val selector=Spinner(this).apply {
             contentDescription="Modo do logger"
@@ -771,12 +999,15 @@ class MainActivity : AppCompatActivity() {
         body.addView(graph,LinearLayout.LayoutParams(0,-1,1f))
         frame.addView(body,LinearLayout.LayoutParams(-1,0,1f))
         val controls=column()
-        val landscape=resources.configuration.orientation==android.content.res.Configuration.ORIENTATION_LANDSCAPE
-        if(landscape) body.addView(controls,LinearLayout.LayoutParams(dp(148),-1)) else frame.addView(controls)
+        val landscape = wide
+        if (landscape) {
+            body.addView(ScrollView(this).apply { addView(controls) }, LinearLayout.LayoutParams(dp(160), -1))
+        } else frame.addView(controls)
         fun control(label:String,parent:LinearLayout,action:()->Unit):Button = button(label,parent,action).apply {
-            minHeight=dp(40)
-            layoutParams=if(parent.orientation==LinearLayout.HORIZONTAL) LinearLayout.LayoutParams(0,dp(44),1f).apply { setMargins(dp(2),0,dp(2),0) }
-                else LinearLayout.LayoutParams(-1,dp(44))
+            minHeight = dp(48)
+            layoutParams = if (parent.orientation == LinearLayout.HORIZONTAL)
+                LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(2), dp(2), dp(2), dp(2)) }
+            else LinearLayout.LayoutParams(-1, -2).apply { setMargins(dp(2), dp(2), dp(2), dp(2)) }
         }
         val actions=if(landscape)controls else row().also { controls.addView(it) }
         triggerStart=control("Iniciar captura",actions) { session.startTriggerLogger() }
@@ -840,14 +1071,17 @@ class MainActivity : AppCompatActivity() {
     private fun connections() {
         title("Conectar ao Speeduino")
         note("${session.ini.signature}\n${session.ini.constants.size} parâmetros · ${session.ini.channels.size} canais")
-        button("Bluetooth serial (SPP)") { bluetoothPermission() }
-        button("Speeduino via cabo USB (OTG)") { chooseUsb() }
-        button("Desconectar") {
+        val (transports, setup) = panes()
+        val physical = card(transports)
+        section("ECU física", physical)
+        button("Bluetooth serial (SPP)", physical) { bluetoothPermission() }
+        button("Speeduino via cabo USB (OTG)", physical) { chooseUsb() }
+        button("Desconectar", physical) {
             cancelUsbReconnect()
             session.disconnect()
         }
-        val sim=card()
-        sim.addView(text("Modo de demonstração",18f))
+        val sim=card(setup)
+        section("Modo de demonstração", sim)
         sim.addView(text("Telemetria simulada para explorar os instrumentos e editores sem uma ECU.",14f,muted))
         button("Iniciar demonstração",sim) {
             if (!session.busy) {
@@ -855,12 +1089,12 @@ class MainActivity : AppCompatActivity() {
                 session.connect(SimLink(session.ini))
             }
         }
-        button("Carregar definição INI") {
+        button("Carregar definição INI", setup) {
             confirm("Trocar definição INI", "A conexão será encerrada e o ajuste local será reiniciado. Salve um MSQ antes de trocar a definição.") { openDocument(IMPORT_INI,"*/*") }
         }
-        note("Bluetooth: pareie o adaptador SPP nas configurações do Android antes de conectar. A velocidade serial do módulo deve coincidir com a ECU.\n\nUSB: ligue a porta USB da Speeduino ao celular com um cabo de dados e, se necessário, um adaptador OTG. O padrão é 115200 baud, 8N1. Para uma porta RS232, use um conversor USB–RS232.")
-        button("Autorizar localização precisa") { locationPermission() }
-        button("Configurações de localização") { startActivity(Intent(android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS)) }
+        physical.addView(text("Bluetooth: pareie o adaptador SPP nas configurações do Android antes de conectar. A velocidade serial do módulo deve coincidir com a ECU.\n\nUSB: ligue a porta USB da Speeduino ao celular com um cabo de dados e, se necessário, um adaptador OTG. O padrão é 115200 baud, 8N1. Para uma porta RS232, use um conversor USB–RS232.", 14f, muted))
+        button("Autorizar localização precisa", setup) { locationPermission() }
+        button("Configurações de localização", setup) { startActivity(Intent(android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS)) }
     }
     private fun locationPermission() {
         if(ContextCompat.checkSelfPermission(this,Manifest.permission.ACCESS_FINE_LOCATION)==PackageManager.PERMISSION_GRANTED) { phone.stop(); phone.start(); return }
@@ -1108,7 +1342,9 @@ class MainActivity : AppCompatActivity() {
                     File(filesDir,"session.msq").delete()
                 }, {
                     cancelUsbReconnect()
-                    old.close(false); model.session=StudioSession(applicationContext); extrema.clear(); bindSession(); render(); toast("Definição INI carregada")
+                    old.close(false); model.session=StudioSession(applicationContext); extrema.clear()
+                    mapQuery = ""; settingsQuery = ""; pageOffsets.clear(); renderedTab = null
+                    bindSession(); render(); toast("Definição INI carregada")
                 })
             }
             ADVISOR -> {
