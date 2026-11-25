@@ -265,7 +265,11 @@ class MainActivity : AppCompatActivity() {
             }
         }
         top.addView(selector,LinearLayout.LayoutParams(0,-2,2f));content.addView(top)
-        if(store.selectedId=="native") { nativeDashboard();return }
+        if(store.selectedId=="native") {
+            nativeDashboard()
+            button("Importar painel (.dash ou RealDash)") { openDocument(IMPORT_DASH,"*/*") }
+            return
+        }
         val entry=store.entries.getOrNull(selected) ?: return
         dashView=newDashView(entry)
         content.addView(dashView?.view,LinearLayout.LayoutParams(-1,-2))
@@ -279,13 +283,20 @@ class MainActivity : AppCompatActivity() {
         vssStatusText=text(vssStatus(),12f,muted);phoneCard.addView(vssStatusText)
         button("VSS Mode e GPS",phoneCard) { editVss {} }
         button("Autorizar GPS e sensores",phoneCard) { locationPermission() }
-        button("Importar painel .dash") { openDocument(IMPORT_DASH,"*/*") }
+        button("Importar painel (.dash ou RealDash)") { openDocument(IMPORT_DASH,"*/*") }
         button("Detalhes do painel") {
             val definition=entry.definition
-            val info=if(entry.vehicle!=null) "${entry.label}\n\n${entry.vehicle.description}\n\nDesenho vetorial original do TunerSpeeduino, com fontes DejaVu incorporadas. A velocidade acompanha a fonte VSS selecionada, incluindo GPS. Sensores sem leitura permanecem indisponíveis." else "${entry.label}\n${definition.components().size} componentes · ${definition.resources().size} recursos embutidos\nFirmware do desenho: ${definition.firmwareSignature()}\n\n"+
+            val format = when {
+                entry.vehicle != null -> "Painel personalizado"
+                entry.isRealDash -> "Arquivo RealDash"
+                else -> "Arquivo .dash"
+            }
+            val signature = definition.firmwareSignature().takeIf { it.isNotBlank() }
+                ?.let { "\nFirmware do desenho: $it" }.orEmpty()
+            val info=if(entry.vehicle!=null) "${entry.label}\n\n${entry.vehicle.description}\n\nDesenho vetorial original do TunerSpeeduino, com fontes DejaVu incorporadas. A velocidade acompanha a fonte VSS selecionada, incluindo GPS. Sensores sem leitura permanecem indisponíveis." else "${entry.label}\n${definition.components().size} componentes · ${definition.resources().size} recursos embutidos$signature\n\n"+
                 (dashView?.diagnostics?.joinToString("\n")?.ifBlank { "Todos os pintores e recursos do arquivo foram reconhecidos." } ?: "")+
                 "\n\nToque no ícone de log para gravar. Segure um instrumento para inspecionar. Use dois dedos para ampliar; toque duas vezes para restaurar a escala."
-            AlertDialog.Builder(this).setTitle(if(entry.vehicle==null) "Arquivo .dash" else "Painel personalizado").setMessage(info).setPositiveButton("Fechar",null).show()
+            AlertDialog.Builder(this).setTitle(format).setMessage(info).setPositiveButton("Fechar",null).show()
         }
         button("Mínimos / máximos do painel") {
             AlertDialog.Builder(this).setTitle("Sessão do painel").setMessage(dashView?.extrema()?.joinToString("\n").orEmpty().ifBlank { "Sem dados disponíveis" })
@@ -1080,8 +1091,11 @@ class MainActivity : AppCompatActivity() {
             }, { toast("MSQ carregado localmente; gravação na ECU pendente"); render() })
             IMPORT_DASH -> {
                 var added:DashboardStore.Entry?=null
-                val name=contentResolver.query(uri,arrayOf(OpenableColumns.DISPLAY_NAME),null,null,null)?.use { cursor -> if(cursor.moveToFirst())cursor.getString(0) else "Painel.dash" } ?: "Painel.dash"
-                session.runOperation({ added=session.dashboards.import(readDocument(uri,"import.dash",16*1024*1024),name) }, { toast("Painel ${added!!.label} importado");tab="Painel";render() })
+                session.runOperation({
+                    val name = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                        ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null } ?: "Painel"
+                    added = session.dashboards.import(readDocument(uri, "dashboard-import.tmp", 16 * 1024 * 1024), name)
+                }, { toast("Painel ${added!!.label} importado");tab="Painel";render() })
             }
             IMPORT_INI -> {
                 val old=session

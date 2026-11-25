@@ -35,7 +35,9 @@ class DashView(
     private val states=definition.components().map { State(it) }
     private val frames=states.map { Frame(it,0f,0f) }
     override val diagnostics=linkedSetOf<String>().apply { addAll(definition.diagnostics()) }
-    private var viewport=DashGeometry.viewport(1.0,1.0)
+    private val designHeight = definition.clusterProperties()["designAspectRatio"]?.toDoubleOrNull()
+        ?.takeIf { it in 0.25..5.0 }?.let { 1200.0 / it } ?: 620.0
+    private var viewport=DashGeometry.viewport(1.0,1.0,designHeight=designHeight)
     private var zoom=1f
     private var panX=0f
     private var panY=0f
@@ -72,7 +74,8 @@ class DashView(
         var reading=DashTelemetry.Reading(null,"")
     }
     init {
-        contentDescription="Painel .dash ${definition.name()}"
+        val format = if (definition.name().endsWith(".rd")) "RealDash" else ".dash"
+        contentDescription="Painel $format ${definition.name()}"
         isFocusable=true; isClickable=true
         ViewCompat.setAccessibilityDelegate(this,accessibility)
         importantForAccessibility=IMPORTANT_FOR_ACCESSIBILITY_YES
@@ -104,11 +107,11 @@ class DashView(
     private fun constrainPan() { panX=panX.coerceIn(width*(1-zoom),0f);panY=panY.coerceIn(height*(1-zoom),0f) }
     override fun onMeasure(widthSpec:Int,heightSpec:Int) {
         val width=MeasureSpec.getSize(widthSpec)
-        val desired=(width*620.0/1200).roundToInt()
+        val desired=(width*designHeight/1200).roundToInt()
         setMeasuredDimension(width,resolveSize(desired,heightSpec))
     }
     override fun onSizeChanged(w:Int,h:Int,oldw:Int,oldh:Int) {
-        viewport=DashGeometry.viewport(w.toDouble(),h.toDouble());constrainPan();accessibility.invalidateRoot()
+        viewport=DashGeometry.viewport(w.toDouble(),h.toDouble(),designHeight=designHeight);constrainPan();accessibility.invalidateRoot()
     }
     override fun onDraw(canvas:Canvas) {
         val now=SystemClock.elapsedRealtime()
@@ -145,6 +148,11 @@ class DashView(
             val frame=frames[index]
             frame.w=w;frame.h=h;frame.resolveScale()
             when(c.painter()) {
+                "Static Image" -> bitmap(canvas,c.text("BackgroundImageFileName"),w,h)
+                "Static Label" -> {
+                    bitmap(canvas,c.text("BackgroundImageFileName"),w,h)
+                    text(canvas,frame,c.text("LabelText"),w/2,h/2,h*.75f,w*.96f,frame.color("FontColor",Color.WHITE))
+                }
                 "Basic Readout" -> readout(canvas,frame)
                 "Analog Gauge", "Circle Analog Gauge" -> dial(canvas,frame)
                 "Asymetric Sweep Gauge" -> sweep(canvas,frame)
