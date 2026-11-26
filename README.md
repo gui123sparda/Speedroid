@@ -2,6 +2,8 @@
 
 Versão Android do projeto com interface nativa em Kotlin e núcleo de interpretação INI, modelo ECU, MSQ e protocolo reaproveitados em Java. O projeto de origem permanece intacto. Android 8.0/API 26 ou superior.
 
+Para começar, siga o [guia de aprendizado](learning.md). Para trabalhar no código ou avaliar uma nova ECU, consulte [AGENTS.md](AGENTS.md).
+
 ## Funcionalidades
 
 - Painel com RPM, MAP, TPS, AFR, temperaturas, bateria, avanço, tempo de injeção e mínimos/máximos. Os painéis personalizados **Rally**, **Ford Escort Zetec 1.8** e **Ford Mondeo 2.0 (1997)** também estão no seletor, com seus desenhos vetoriais portados do projeto Java. Painéis originais Speeduino Sweep, LED e LED Amber carregados dos próprios arquivos `.dash`, com fontes e imagens embutidas, zoom e tela cheia.
@@ -14,6 +16,7 @@ Versão Android do projeto com interface nativa em Kotlin e núcleo de interpret
 - Velocidade GPS independente da conexão com a ECU e aceleração linear do celular. Predição breve entre leituras de GPS válidas.
 - Log CSV a 5 Hz, histórico de comunicação e demonstração claramente identificada.
 - **Tooth / Composite Logger** em **Logs**, com intervalos entre dentes e trilhas digitais de rotação, fase e sincronismo, captura contínua, congelamento, cursor, zoom e CSV. Veja [uso e protocolo](docs/trigger-logger/README.md).
+- Aba **Configurações** com temas claro, escuro e do sistema, opção de manter a tela ligada, permissões de GPS e arquivos INI/MSQ.
 - Sessão de ajuste persistida localmente; alterações pendentes continuam pendentes após reiniciar. Rotação da tela preserva a sessão.
 
 ## Compilar e instalar
@@ -31,7 +34,7 @@ O `local.properties` informa o SDK Android da máquina. Não é necessário mant
 
 1. Abra **Conexão → Iniciar demonstração** para explorar a interface sem hardware. O modo de demonstração simula somente a ECU, nunca o GPS.
 2. Em **Painel**, toque em **Autorizar GPS e sensores**, conceda localização **precisa** e ative o GPS. Use o aparelho em local com boa recepção de satélites.
-3. Para a ECU real, escolha o transporte abaixo. O INI incluído tem assinatura `speeduino 202501`. A assinatura da ECU precisa corresponder exatamente, ignorando maiúsculas/minúsculas. Use **Carregar definição INI** para outro firmware; salve o MSQ antes, pois a troca reinicia o ajuste local.
+3. Para a ECU real, escolha o transporte abaixo. O INI incluído tem assinatura `speeduino 202501`. A assinatura da ECU precisa corresponder exatamente, ignorando maiúsculas/minúsculas. Use **Configurações → Carregar definição INI** para outro firmware; salve o MSQ antes, pois a troca reinicia o ajuste local.
 4. Modifique parâmetros em **Ajustes** ou células em **Mapas**. As alterações ficam locais até **Ajustes → Gravar na ECU**. Essa ação pede confirmação na própria interface. Sem alterações locais pendentes, conectar baixa as páginas da ECU; com alterações pendentes, preserva a cópia local. **Ler novamente da ECU** substitui os ajustes locais.
 5. Em **Logs**, inicie e pare a gravação; depois use **Exportar CSV**. Os arquivos são escolhidos pelo seletor de documentos do Android, sem permissão geral de armazenamento.
 
@@ -69,7 +72,7 @@ Cada registro suporta até 60.000 amostras (aproximadamente 3h20 a 5 Hz) e para 
 
 O núcleo em `org.clonetuner.ini`, `org.clonetuner.model` e parte de `org.clonetuner.comm` vem do projeto Java informado. `StreamLink` generaliza o transporte serial original, substituindo jSerialComm por `SerialIo`. A interface e os transportes Android estão em `com.example.tunerstudioandroid`.
 
-As telas Android foram adaptadas para toque e rolagem. Os editores de mapas e curvas ocupam a tela disponível, ajustando células e fontes sem rolagem; os eixos X dos mapas aparecem na base. Os arquivos **Speeduino_Sweep.dash**, **Speeduino_LED.dash** e **Speeduino_LED_Amber.dash** da instalação de referência estão incluídos sem alterações. São 24, 49 e 49 componentes, respectivamente. O renderizador Android usa a geometria relativa, ordem de desenho, cores ARGB com transparência, fontes TTF e imagens embutidas dos documentos. Implementa os seis tipos de pintor presentes nesses arquivos, aliases dos canais antigos, graus Celsius/Fahrenheit explícitos, escalas invertidas, avisos, suavização e histórico. A fonte GPS real alimenta os instrumentos `gpsSpeedMPH` e o indicador `gpsActive`; dados indisponíveis não recebem números fictícios.
+As telas Android foram adaptadas para toque e rolagem. Os editores de mapas e curvas ocupam a tela disponível, com rolagem para preservar células legíveis e eixos acessíveis; os eixos X dos mapas aparecem na base. Os arquivos **Speeduino_Sweep.dash**, **Speeduino_LED.dash** e **Speeduino_LED_Amber.dash** da instalação de referência estão incluídos sem alterações. São 24, 49 e 49 componentes, respectivamente. O renderizador Android usa a geometria relativa, ordem de desenho, cores ARGB com transparência, fontes TTF e imagens embutidas dos documentos. Implementa os seis tipos de pintor presentes nesses arquivos, aliases dos canais antigos, graus Celsius/Fahrenheit explícitos, escalas invertidas, avisos, suavização e histórico. A fonte GPS real alimenta os instrumentos `gpsSpeedMPH` e o indicador `gpsActive`; dados indisponíveis não recebem números fictícios.
 
 Use o seletor na aba **Painel** para trocar o arquivo. **Tela cheia** preserva a proporção do desenho e mantém o modo de conexão visível. Toque no ícone de logging para iniciar/parar o CSV, segure um instrumento para inspecionar e use dois dedos para ampliar. O histórico e os extremos ficam na sessão, independentes da recriação da View.
 

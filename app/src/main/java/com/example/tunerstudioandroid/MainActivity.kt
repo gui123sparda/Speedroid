@@ -24,7 +24,9 @@ import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.ColorUtils
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowCompat
@@ -98,12 +100,27 @@ class MainActivity : AppCompatActivity() {
     private var lastLog = 0L
     private var layout = "Verde"
     private val extrema = mutableMapOf<String, Pair<Double,Double>>()
-    private val bg = Color.rgb(9, 15, 22)
-    private val panel = Color.rgb(20, 30, 43)
-    private val raised = Color.rgb(30, 44, 59)
-    private val muted = Color.rgb(173, 191, 207)
-    private val teal = Color.rgb(106, 232, 201)
-    private val amber = Color.rgb(255, 199, 112)
+    private val bg by lazy { getColor(R.color.speedroid_background) }
+    private val panel by lazy { getColor(R.color.speedroid_panel) }
+    private val raised by lazy { getColor(R.color.speedroid_raised) }
+    private val primaryTextColor by lazy { getColor(R.color.speedroid_text) }
+    private val muted by lazy { getColor(R.color.speedroid_muted) }
+    private val teal by lazy { getColor(R.color.speedroid_accent) }
+    private val amber by lazy { getColor(R.color.speedroid_warning) }
+    private val borderColor by lazy { getColor(R.color.speedroid_border) }
+    private val errorColor by lazy { getColor(R.color.speedroid_error) }
+    private val appPreferences get() = getSharedPreferences("app_settings", MODE_PRIVATE)
+
+    private enum class Appearance(val label: String, val nightMode: Int) {
+        SYSTEM("Sistema", AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM),
+        LIGHT("Claro", AppCompatDelegate.MODE_NIGHT_NO),
+        DARK("Escuro", AppCompatDelegate.MODE_NIGHT_YES)
+    }
+
+    private val appearance: Appearance
+        get() = Appearance.entries.find { it.name == appPreferences.getString("appearance", null) }
+            ?: Appearance.DARK
+
     private val permissionAction get() = "$packageName.USB_PERMISSION"
     private val usb get() = getSystemService(UsbManager::class.java)
     private val refresh = object : Runnable {
@@ -126,6 +143,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        delegate.localNightMode = appearance.nightMode
         super.onCreate(savedInstanceState)
         model = ViewModelProvider(this)[StudioModel::class.java]
         phone = PhoneSensors(this).apply { onGpsFix = { session.gpsFix = it } }
@@ -139,7 +157,10 @@ class MainActivity : AppCompatActivity() {
         pendingUsb = savedInstanceState?.getBundle("pendingUsb")
         usbPermissionDenied = savedInstanceState?.getBoolean("usbPermissionDenied") == true
         layout = getPreferences(MODE_PRIVATE).getString("layout", "Verde")!!.let { when(it) { "Rally"->"Verde";"Escort"->"Azul";"Mondeo"->"Âmbar";else->it } }
-        root = column().apply { setBackgroundColor(bg) }
+        root = column().apply {
+            setBackgroundColor(bg)
+            keepScreenOn = appPreferences.getBoolean("keep_screen_on", false)
+        }
         setContentView(root)
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
@@ -172,6 +193,7 @@ class MainActivity : AppCompatActivity() {
         super.onPostResume()
         activityResumed = true
         finishUsbPermission()
+        if (tab == "Configurações") render()
         handler.post(usbReconnectCheck)
     }
     override fun onPause() {
@@ -210,7 +232,7 @@ class MainActivity : AppCompatActivity() {
     private fun dp(n: Int) = (n * resources.displayMetrics.density).roundToInt()
     private fun column() = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
     private fun row() = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-    private fun text(value: String, size: Float = 15f, color: Int = Color.WHITE) = TextView(this).apply {
+    private fun text(value: String, size: Float = 15f, color: Int = primaryTextColor) = TextView(this).apply {
         text = value; textSize = size; setTextColor(color); setPadding(dp(4), dp(6), dp(4), dp(6))
     }
     private fun title(value: String) = section(value, content, 27f)
@@ -223,10 +245,10 @@ class MainActivity : AppCompatActivity() {
     }
     private fun note(value: String) { content.addView(text(value,14f,muted)) }
     private fun shape(color: Int, stroke: Boolean = false, radius: Int = 14) = GradientDrawable().apply {
-        setColor(color); cornerRadius = dp(radius).toFloat(); if (stroke) setStroke(dp(1), Color.rgb(43,61,76))
+        setColor(color); cornerRadius = dp(radius).toFloat(); if (stroke) setStroke(dp(1), borderColor)
     }
     private fun interactive(color: Int, border: Boolean = false, radius: Int = 14) = RippleDrawable(
-        ColorStateList.valueOf(0x446AE8C9), shape(color, border, radius), shape(Color.WHITE, radius = radius)
+        ColorStateList.valueOf(ColorUtils.setAlphaComponent(primaryTextColor, 36)), shape(color, border, radius), shape(Color.WHITE, radius = radius)
     )
     private fun card(parent: LinearLayout = content) = column().apply {
         background = shape(panel, true); setPadding(dp(12),dp(10),dp(12),dp(10))
@@ -268,7 +290,7 @@ class MainActivity : AppCompatActivity() {
         model.usbReconnect?.permissionDenied == true -> "Acesso USB recusado · autorize pelo menu Conexão"
         (model.usbReconnect?.attempts ?: 0) >= USB_RECONNECT_ATTEMPTS -> "Reconexão USB pausada · reconecte o cabo"
         model.usbReconnect?.armed == true -> "Aguardando reconexão USB"
-        else -> "Speeduino · ${session.ini.signature}"
+        else -> "Definição · ${session.ini.signature}"
     }
     private fun render() {
         renderedTab?.let { pageOffsets[it] = pageScroll?.scrollY ?: 0 }
@@ -302,10 +324,11 @@ class MainActivity : AppCompatActivity() {
         val navigation = if (wide) column() else row()
         navigation.setBackgroundColor(panel)
         navigation.setPadding(dp(4), dp(4), dp(4), dp(4))
-        listOf("Painel", "Ajustes", "Mapas", "Logs", "Conexão").forEach { name ->
+        listOf("Painel", "Ajustes", "Mapas", "Logs", "Conexão", "Configurações").forEach { name ->
             val selected = tab == name
             val item = Button(this).apply {
-                text = name
+                text = if (!wide && name == "Configurações") "Config." else name
+                contentDescription = name
                 isAllCaps = false
                 textSize = 12f
                 setTextColor(if (selected) bg else muted)
@@ -335,10 +358,11 @@ class MainActivity : AppCompatActivity() {
         pageOffsets[tab]?.let { offset -> scroll.post { scroll.scrollTo(0, offset) } }
         when(tab) {
             "Painel" -> dashboard()
-            "Ajustes" -> settings()
+            "Ajustes" -> ecuAdjustments()
             "Mapas" -> maps()
             "Logs" -> logging()
             "Conexão" -> connections()
+            "Configurações" -> appSettings()
         }
         updateReadings()
     }
@@ -583,7 +607,7 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this).setTitle("Canais · leitura atual").setMessage(snapshot).setPositiveButton("Fechar",null).show()
     }
 
-    private fun settings() {
+    private fun ecuAdjustments() {
         title("Ajustes da ECU")
         val (parameters, tools) = panes()
         val ecuActions = card(tools)
@@ -597,15 +621,18 @@ class MainActivity : AppCompatActivity() {
             }
         }
         button("Ler novamente da ECU", ecuActions) {
+            if (!session.transport.isConnected) {
+                toast("Conecte uma ECU ou inicie a demonstração")
+                return@button
+            }
             confirm("Ler páginas da ECU", "Esta leitura substituirá os ajustes locais pelas páginas da ECU conectada.") {
                 session.runOperation({ session.transport.downloadPages(); session.saveSession() }, { render() })
             }
         }
         val fileRow=card(tools)
-        section("Arquivos e ferramentas", fileRow)
+        section("Ferramentas de ajuste", fileRow)
         button("VSS Mode e GPS",fileRow) { editVss {} }
-        button("Abrir ajuste MSQ",fileRow) { openDocument(IMPORT_MSQ,"*/*") }
-        button("Salvar ajuste MSQ",fileRow) { createDocument(EXPORT_MSQ,"application/xml","speeduino.msq") }
+        button("Arquivos do projeto",fileRow) { tab = "Configurações"; render() }
         button("Calculadora de combustível requerido",fileRow) { requiredFuel() }
         section("Parâmetros", parameters)
         val search = searchField("Buscar parâmetro ou diálogo", settingsQuery)
@@ -709,12 +736,27 @@ class MainActivity : AppCompatActivity() {
     private fun searchField(label: String, query: String) = EditText(this).apply {
         hint = label
         setSingleLine()
-        setTextColor(Color.WHITE)
+        setTextColor(primaryTextColor)
         setHintTextColor(muted)
         minHeight = dp(52)
         background = shape(panel, true)
         setPadding(dp(12), dp(8), dp(12), dp(8))
         setText(query)
+    }
+
+    private enum class MapGroup(val label: String) {
+        FUEL("Combustível e mistura"), IGNITION("Ignição"), BOOST("Pressão de turbo"), OTHER("Outras tabelas")
+    }
+
+    private fun mapGroup(zBins: String): MapGroup {
+        val key = zBins.lowercase(Locale.ROOT)
+        return when {
+            key.startsWith("vetable") || key.startsWith("fueltrim") ||
+                key in setOf("afrtable", "lambdatable", "stagingtable") -> MapGroup.FUEL
+            key.startsWith("advtable") -> MapGroup.IGNITION
+            key.startsWith("boosttable") -> MapGroup.BOOST
+            else -> MapGroup.OTHER
+        }
     }
 
     private fun maps() {
@@ -739,8 +781,10 @@ class MainActivity : AppCompatActivity() {
             }
             val (tableList, curveList) = if (foundTables.isNotEmpty() && foundCurves.isNotEmpty()) panes(results) else results to results
             if (foundTables.isNotEmpty()) {
-                section("Tabelas", tableList)
-                foundTables.forEach { table -> button(table.title.ifBlank { table.id }, tableList) { tableEditor(table) } }
+                foundTables.groupBy { mapGroup(it.zBins) }.toSortedMap().forEach { (group, entries) ->
+                    section(group.label, tableList)
+                    entries.forEach { table -> button(table.title.ifBlank { table.id }, tableList) { tableEditor(table) } }
+                }
             }
             if (foundCurves.isNotEmpty()) {
                 section("Curvas", curveList)
@@ -774,6 +818,7 @@ class MainActivity : AppCompatActivity() {
         frame.addView(heading)
         frame.addView(text(help, 13f, muted))
         val viewport = MapViewport(this)
+        frame.keepScreenOn = root.keepScreenOn
         frame.addView(viewport, LinearLayout.LayoutParams(-1, 0, 1f))
         build(viewport)
         viewport.restore(mapPosition ?: MapViewport.Position(0, if (id.startsWith("table:")) Int.MAX_VALUE else 0))
@@ -890,7 +935,7 @@ class MainActivity : AppCompatActivity() {
                     indices.map { index ->
                         axes.mapIndexed { axisIndex, c ->
                             val label = session.ecu.format(c, session.ecu.get(c, index))
-                            mapCell(label, Color.WHITE, "${c.name} [$index], valor $label") {
+                            mapCell(label, primaryTextColor, "${c.name} [$index], valor $label") {
                                 edit(c, index, labels[axisIndex]) { populate() }
                             }
                         }
@@ -1055,7 +1100,7 @@ class MainActivity : AppCompatActivity() {
             !transport.supportsTriggerLogger(session.selectedTriggerMode) -> "INI sem logger compatível"
             else -> "$source · pronto para capturar"
         }
-        triggerStatus?.setTextColor(if(transport.triggerLoggerError()!=null) Color.rgb(255,100,100) else teal)
+        triggerStatus?.setTextColor(if(transport.triggerLoggerError()!=null) errorColor else teal)
         triggerSummary?.text=when {
             capture==null -> "Composite: rotação, fase e sincronismo. Tooth: intervalo entre dentes em µs."
             capture.samples().isEmpty() -> "Bloco sem eventos válidos; verifique sensor, ligação e configuração de entrada."
@@ -1069,7 +1114,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun connections() {
-        title("Conectar ao Speeduino")
+        title("Conexão com a ECU")
         note("${session.ini.signature}\n${session.ini.constants.size} parâmetros · ${session.ini.channels.size} canais")
         val (transports, setup) = panes()
         val physical = card(transports)
@@ -1089,13 +1134,63 @@ class MainActivity : AppCompatActivity() {
                 session.connect(SimLink(session.ini))
             }
         }
-        button("Carregar definição INI", setup) {
-            confirm("Trocar definição INI", "A conexão será encerrada e o ajuste local será reiniciado. Salve um MSQ antes de trocar a definição.") { openDocument(IMPORT_INI,"*/*") }
-        }
         physical.addView(text("Bluetooth: pareie o adaptador SPP nas configurações do Android antes de conectar. A velocidade serial do módulo deve coincidir com a ECU.\n\nUSB: ligue a porta USB da Speeduino ao celular com um cabo de dados e, se necessário, um adaptador OTG. O padrão é 115200 baud, 8N1. Para uma porta RS232, use um conversor USB–RS232.", 14f, muted))
-        button("Autorizar localização precisa", setup) { locationPermission() }
-        button("Configurações de localização", setup) { startActivity(Intent(android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS)) }
     }
+
+    private fun appSettings() {
+        title("Configurações")
+        val (preferences, projectTools) = panes()
+        val display = card(preferences)
+        section("Aparência", display)
+        button("Tema · ${appearance.label}", display) {
+            val options = Appearance.entries
+            AlertDialog.Builder(this).setTitle("Tema")
+                .setSingleChoiceItems(options.map { it.label }.toTypedArray(), appearance.ordinal) { dialog, index ->
+                    val selected = options[index]
+                    appPreferences.edit().putString("appearance", selected.name).apply()
+                    dialog.dismiss()
+                    delegate.localNightMode = selected.nightMode
+                    if (!isDestroyed) render()
+                }
+                .setNegativeButton("Cancelar", null)
+                .show()
+        }
+        display.addView(androidx.appcompat.widget.SwitchCompat(this).apply {
+            text = "Manter a tela ligada"
+            setTextColor(primaryTextColor)
+            minHeight = dp(48)
+            isChecked = root.keepScreenOn
+            setOnCheckedChangeListener { _, enabled ->
+                appPreferences.edit().putBoolean("keep_screen_on", enabled).apply()
+                root.keepScreenOn = enabled
+            }
+        })
+
+        val project = card(projectTools)
+        section("Projeto e arquivos", project)
+        project.addView(text(session.ini.signature, 14f, muted))
+        button("Salvar ajuste MSQ", project) { createDocument(EXPORT_MSQ, "application/xml", "speedroid.msq") }
+        button("Abrir ajuste MSQ", project) {
+            confirm("Abrir ajuste MSQ", "Os parâmetros do arquivo substituirão os valores correspondentes na cópia local. Salve um MSQ antes de continuar.") {
+                openDocument(IMPORT_MSQ, "*/*")
+            }
+        }
+        button("Carregar definição INI", project) {
+            confirm("Trocar definição INI", "A conexão será encerrada e o ajuste local será reiniciado. Salve um MSQ antes de trocar a definição.") {
+                openDocument(IMPORT_INI, "*/*")
+            }
+        }
+
+        val location = card(preferences)
+        section("GPS do celular", location)
+        val precise = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        location.addView(text(if (precise) "Localização precisa autorizada" else "Localização precisa pendente", 14f, muted))
+        if (!precise) button("Autorizar localização precisa", location) { locationPermission() }
+        button("Configurações de localização", location) {
+            startActivity(Intent(android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+        }
+    }
+
     private fun locationPermission() {
         if(ContextCompat.checkSelfPermission(this,Manifest.permission.ACCESS_FINE_LOCATION)==PackageManager.PERMISSION_GRANTED) { phone.stop(); phone.start(); return }
         requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION,Manifest.permission.ACCESS_COARSE_LOCATION),GPS_PERMISSION)

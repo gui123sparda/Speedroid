@@ -1,0 +1,11 @@
+<resources>
+    <color name="speedroid_background">#090F16</color>
+    <color name="speedroid_panel">#141E2B</color>
+    <color name="speedroid_raised">#1E2C3B</color>
+    <color name="speedroid_text">#FFFFFF</color>
+    <color name="speedroid_muted">#ADBFCF</color>
+    <color name="speedroid_accent">#6AE8C9</color>
+    <color name="speedroid_warning">#FFC770</color>
+    <color name="speedroid_border">#2B3D4C</color>
+    <color name="speedroid_error">#FF8888</color>
+</resources>

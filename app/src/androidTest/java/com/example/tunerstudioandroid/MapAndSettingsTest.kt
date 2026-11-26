@@ -114,6 +114,25 @@ class MapAndSettingsTest {
         }
     }
 
+    @Test fun appThemeAndScreenPreferenceSurviveRecreation() {
+        onView(withContentDescription("Configurações")).perform(click())
+        onView(withText("Tema · Escuro")).perform(scrollTo(), click())
+        onView(withText("Claro")).inRoot(isDialog()).perform(click())
+        onView(withText("Tema · Claro")).check(androidx.test.espresso.assertion.ViewAssertions.matches(isDisplayed()))
+        onView(withText("Manter a tela ligada")).perform(scrollTo(), click())
+        activity.scenario.recreate()
+        activity.scenario.onActivity { a ->
+            assertEquals(android.content.res.Configuration.UI_MODE_NIGHT_NO,
+                a.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK)
+            val toggle = descendants(a.window.decorView).filterIsInstance<androidx.appcompat.widget.SwitchCompat>().single()
+            assertTrue(toggle.isChecked)
+        }
+        onView(withText("Manter a tela ligada")).perform(scrollTo(), click())
+        onView(withText("Tema · Claro")).perform(scrollTo(), click())
+        onView(withText("Escuro")).inRoot(isDialog()).perform(click())
+        onView(withText("Tema · Escuro")).check(androidx.test.espresso.assertion.ViewAssertions.matches(isDisplayed()))
+    }
+
     @Test fun settingsDoNotListInternalPanelsAsSeparateFeatures() {
         onView(withText("Ajustes")).perform(click())
         activity.scenario.onActivity { a ->

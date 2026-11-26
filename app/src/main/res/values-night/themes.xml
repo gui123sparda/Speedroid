@@ -1,16 +1,18 @@
 <resources>
     <style name="Theme.TunerStudioAndroid" parent="Theme.MaterialComponents.NoActionBar">
-        <item name="colorPrimary">#6AE8C9</item>
-        <item name="colorPrimaryVariant">#141E2B</item>
-        <item name="colorOnPrimary">#071410</item>
-        <item name="colorSecondary">#6AE8C9</item>
-        <item name="colorSurface">#141E2B</item>
-        <item name="colorOnSurface">#FFFFFF</item>
+        <item name="colorPrimary">@color/speedroid_accent</item>
+        <item name="colorPrimaryVariant">@color/speedroid_panel</item>
+        <item name="colorOnPrimary">@color/speedroid_background</item>
+        <item name="colorSecondary">@color/speedroid_accent</item>
+        <item name="colorSurface">@color/speedroid_panel</item>
+        <item name="colorOnSurface">@color/speedroid_text</item>
+        <item name="colorError">@color/speedroid_error</item>
         <item name="android:fontFamily">sans</item>
         <item name="android:windowLightStatusBar">false</item>
-        <item name="android:statusBarColor">#090F16</item>
-        <item name="android:navigationBarColor">#090F16</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:statusBarColor">@color/speedroid_background</item>
+        <item name="android:navigationBarColor">@color/speedroid_background</item>
         <item name="android:windowActionModeOverlay">true</item>
-        <item name="android:windowBackground">#090F16</item>
+        <item name="android:windowBackground">@color/speedroid_background</item>
     </style>
 </resources>
